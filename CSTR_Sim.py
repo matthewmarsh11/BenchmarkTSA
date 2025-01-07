@@ -14,12 +14,18 @@ class SimulationResult:
         """Makes SimulationResult iterable, yielding (observed_states, disturbances, actions)"""
         return iter((self.observed_states, self.disturbances, self.actions))
 
+@dataclass
+class SimulationConfig:
+    """Configuration for simulation data collection"""
+    n_simulations: int
+    T: int
+    tsim: int
+    noise_percentage: float = 0.01
+
 class CSTRSimulator:
     def __init__(
         self,
-        T: int,
-        tsim: int,
-        noise_percentage: float = 0.005
+        config
     ):
         """
         Initialize the CSTR simulator.
@@ -29,9 +35,7 @@ class CSTRSimulator:
             tsim (int): Simulation time period
             noise_percentage (float): Noise level for simulation
         """
-        self.T = T
-        self.tsim = tsim
-        self.noise_percentage = noise_percentage
+        self.config = config
         
         # Define spaces
         self.action_space = {
@@ -59,11 +63,11 @@ class CSTRSimulator:
     def generate_setpoints(self) -> Dict[str, List[float]]:
         """Generate random setpoints for the simulation."""
         num_changes = np.random.randint(0, 5)
-        change_points = np.sort(np.random.choice(range(1, self.tsim), num_changes, replace=False))
+        change_points = np.sort(np.random.choice(range(1, self.config.tsim), num_changes, replace=False))
         setpoints = []
         current_setpoint = np.random.rand()
         
-        for t in range(self.tsim):
+        for t in range(self.config.tsim):
             if len(change_points) > 0 and t == change_points[0]:
                 current_setpoint = np.random.rand()
                 change_points = change_points[1:]
@@ -78,11 +82,11 @@ class CSTRSimulator:
         
         # Temperature disturbances
         num_changes_temp = np.random.randint(0, 4)
-        change_points_temp = np.sort(np.random.choice(range(1, self.tsim), num_changes_temp, replace=False))
+        change_points_temp = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_temp, replace=False))
         disturbances_temp = []
         current_disturbance_temp = nominal_temp + (np.random.rand() - 0.5) * 10
         
-        for t in range(self.tsim):
+        for t in range(self.config.tsim):
             if len(change_points_temp) > 0 and t == change_points_temp[0]:
                 current_disturbance_temp = nominal_temp + (np.random.rand() - 0.5) * 10
                 change_points_temp = change_points_temp[1:]
@@ -90,11 +94,11 @@ class CSTRSimulator:
         
         # Concentration disturbances
         num_changes_conc = np.random.randint(0, 4)
-        change_points_conc = np.sort(np.random.choice(range(1, self.tsim), num_changes_conc, replace=False))
+        change_points_conc = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_conc, replace=False))
         disturbances_conc = []
         current_disturbance_conc = nominal_conc + (np.random.rand() - 0.5) * 0.1
         
-        for t in range(self.tsim):
+        for t in range(self.config.tsim):
             if len(change_points_conc) > 0 and t == change_points_conc[0]:
                 current_disturbance_conc = nominal_conc + (np.random.rand() - 0.5) * 0.1
                 change_points_conc = change_points_conc[1:]
@@ -119,15 +123,15 @@ class CSTRSimulator:
         disturbances, disturbance_space = self.generate_disturbances()
         
         env_params = {
-            'N': self.T,
-            'tsim': self.tsim,
+            'N': self.config.T,
+            'tsim': self.config.tsim,
             'SP': setpoints,
             'o_space': self.observation_space,
             'a_space': self.action_space,
             'x0': np.array([0.8, 330, 0.8]),
             'model': 'cstr',
             'noise': True,
-            'noise_percentage': self.noise_percentage,
+            'noise_percentage': self.config.noise_percentage,
             'normalise_o': True,
             'normalise_a': True,
             'disturbance_bounds': disturbance_space,
@@ -175,7 +179,7 @@ class CSTRSimulator:
         
         return self._format_results(observed_states, disturbance_values, actions)
     
-    def run_multiple_simulations(self, num_simulations: int) -> List[SimulationResult]:
+    def run_multiple_simulations(self) -> List[SimulationResult]:
         """
         Run multiple simulations and return results.
         
@@ -186,7 +190,7 @@ class CSTRSimulator:
         Returns:
             List[SimulationResult]: List of simulation results
         """
-        return [self.simulate() for _ in range(num_simulations)]
+        return [self.simulate() for _ in range(self.config.n_simulations)]
 
     def plot_results(self, results: List[SimulationResult]) -> None:
         """
@@ -196,7 +200,7 @@ class CSTRSimulator:
             results (List[SimulationResult]): List of simulation results
         """
         # Create subplots for observed states
-        fig_obs, axs_obs = plt.subplots(3, 1, figsize=(10, 12))
+        fig_obs, axs_obs = plt.subplots(3, 1, figsize=(10, 8))
         fig_dist, axs_dist = plt.subplots(2, 1, figsize=(10, 8))
         fig_act, axs_act = plt.subplots(1, 1, figsize=(10, 4))
         
@@ -292,12 +296,12 @@ class CSTRSimulator:
         
         return SimulationResult(obs_states, dist_states, action_states)
 
-# simulator = CSTRSimulator(T=10, tsim=50, noise_percentage=0.1)
+# config = SimulationConfig(n_simulations=3, T=10, tsim=50, noise_percentage=0.1)
+# simulator = CSTRSimulator(config)
 
-# # Run multiple simulations
-# num_simulations = 10
-# time_steps = 50
-# simulation_results = simulator.run_multiple_simulations(num_simulations)
+# # # Run multiple simulations
+
+# simulation_results = simulator.run_multiple_simulations()
 
 # # Plot the results
 # simulator.plot_results(simulation_results)

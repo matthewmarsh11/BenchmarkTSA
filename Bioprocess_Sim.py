@@ -13,13 +13,20 @@ class SimulationResult:
     def __iter__(self) -> Iterator[Dict[str, List[float]]]:
         """Makes SimulationResult iterable, yielding (observed_states, disturbances, actions)"""
         return iter((self.observed_states, self.actions, self.cons_check))
-    
+
+@dataclass
+class SimulationConfig:
+    """Configuration for simulation data collection"""
+    n_simulations: int
+    T: int
+    tsim: int
+    noise_percentage: float = 0.01
+
+
 class BioProcessSimulator:
     def __init__(
         self,
-        T: int,
-        tsim: int,
-        noise_percentage: float = 0.01,
+        config: SimulationConfig,
         constraints: Optional[Callable] = None
     ):
         """
@@ -31,9 +38,7 @@ class BioProcessSimulator:
             noise_percentage (float): Noise level for simulation
             constraints (Callable, optional): Constraint function that takes state and action as input
         """
-        self.T = T
-        self.tsim = tsim
-        self.noise_percentage = noise_percentage
+        self.config = config
         self.constraints = constraints or (lambda x, u: np.array([x[1] - 800, x[2] - 0.011*x[0]]).reshape(-1,))
         
         # Define spaces
@@ -75,14 +80,14 @@ class BioProcessSimulator:
         const_values = []
         
         env_params = {
-            'N': self.T,
-            'tsim': self.tsim,
+            'N': self.config.T,
+            'tsim': self.config.tsim,
             'o_space': self.observation_space,
             'a_space': self.action_space,
             'x0': self.x0,
             'model': 'photo_production',
             'noise': True,
-            'noise_percentage': self.noise_percentage,
+            'noise_percentage': self.config.noise_percentage,
             'normalise_o': True,
             'normalise_a': True,
             'reward_states': np.array(['c_q']),
@@ -145,7 +150,7 @@ class BioProcessSimulator:
         
         return self._format_results(observed_states, actions, const_values)
     
-    def run_multiple_simulations(self, num_simulations: int) -> List[SimulationResult]:
+    def run_multiple_simulations(self) -> List[SimulationResult]:
         """
         Run multiple simulations and return results.
         
@@ -155,7 +160,7 @@ class BioProcessSimulator:
         Returns:
             List[SimulationResult]: List of simulation results
         """
-        return [self.simulate() for _ in range(num_simulations)]
+        return [self.simulate() for _ in range(self.config.n_simulations)]
 
     def _normalize_action(self, action: np.ndarray) -> np.ndarray:
         """Normalize action to [-1, 1] range."""
@@ -289,7 +294,7 @@ class BioProcessSimulator:
         # plt.show()
         
         
-        
-# simulator = BioProcessSimulator(T=20, tsim=240, noise_percentage=0.01)
-# simulation_results = simulator.run_multiple_simulations(num_simulations=100)
+# sim_config = SimulationConfig(n_simulations=100, T=20, tsim=240, noise_percentage=0.01)
+# simulator = BioProcessSimulator(sim_config)
+# simulation_results = simulator.run_multiple_simulations()
 # simulator.plot_results(simulation_results)
