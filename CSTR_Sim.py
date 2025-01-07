@@ -1,7 +1,7 @@
 import numpy as np
 from pcgym import make_env
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional, Iterator
 from dataclasses import dataclass
 
 @dataclass
@@ -10,6 +10,9 @@ class SimulationResult:
     observed_states: Dict[str, List[float]]
     disturbances: Dict[str, List[float]]
     actions: Dict[str, List[float]]
+    def __iter__(self) -> Iterator[Dict[str, List[float]]]:
+        """Makes SimulationResult iterable, yielding (observed_states, disturbances, actions)"""
+        return iter((self.observed_states, self.disturbances, self.actions))
 
 class CSTRSimulator:
     def __init__(
@@ -102,7 +105,7 @@ class CSTRSimulator:
         
         return disturbances, disturbance_space
 
-    def simulate(self, time_steps: int) -> SimulationResult:
+    def simulate(self) -> SimulationResult:
         """
         Run a single simulation.
         
@@ -117,7 +120,7 @@ class CSTRSimulator:
         
         env_params = {
             'N': self.T,
-            'tsim': time_steps,
+            'tsim': self.tsim,
             'SP': setpoints,
             'o_space': self.observation_space,
             'a_space': self.action_space,
@@ -172,7 +175,7 @@ class CSTRSimulator:
         
         return self._format_results(observed_states, disturbance_values, actions)
     
-    def run_multiple_simulations(self, num_simulations: int, time_steps: int) -> List[SimulationResult]:
+    def run_multiple_simulations(self, num_simulations: int) -> List[SimulationResult]:
         """
         Run multiple simulations and return results.
         
@@ -183,7 +186,7 @@ class CSTRSimulator:
         Returns:
             List[SimulationResult]: List of simulation results
         """
-        return [self.simulate(time_steps) for _ in range(num_simulations)]
+        return [self.simulate() for _ in range(num_simulations)]
 
     def plot_results(self, results: List[SimulationResult]) -> None:
         """
@@ -289,12 +292,12 @@ class CSTRSimulator:
         
         return SimulationResult(obs_states, dist_states, action_states)
 
-simulator = CSTRSimulator(T=10, tsim=50, noise_percentage=0.1)
+# simulator = CSTRSimulator(T=10, tsim=50, noise_percentage=0.1)
 
-# Run multiple simulations
-num_simulations = 10
-time_steps = 50
-simulation_results = simulator.run_multiple_simulations(num_simulations, time_steps)
+# # Run multiple simulations
+# num_simulations = 10
+# time_steps = 50
+# simulation_results = simulator.run_multiple_simulations(num_simulations)
 
-# Plot the results
-simulator.plot_results(simulation_results)
+# # Plot the results
+# simulator.plot_results(simulation_results)

@@ -1,7 +1,7 @@
 import numpy as np
 from pcgym import make_env
 import matplotlib.pyplot as plt
-from typing import Callable, Dict, List, Tuple, Optional, Union
+from typing import Callable, Dict, List, Tuple, Optional, Union, Iterator
 from dataclasses import dataclass
 
 @dataclass
@@ -10,6 +10,9 @@ class SimulationResult:
     observed_states: Dict[str, List[float]]
     actions: Dict[str, List[float]]
     cons_check: Dict[bool, List[float]]
+    def __iter__(self) -> Iterator[Dict[str, List[float]]]:
+        """Makes SimulationResult iterable, yielding (observed_states, disturbances, actions)"""
+        return iter((self.observed_states, self.actions, self.cons_check))
     
 class BioProcessSimulator:
     def __init__(
@@ -56,21 +59,10 @@ class BioProcessSimulator:
             'k_N': 0.10
         }
         
-        self.disturbances = {
-            'd_c': 0.0,
-            'd_N': 0.0,
-            'd_q': 0.0
-        }
-        
-        self.disturbance_space = {
-            'low': np.array([0]*3),
-            'high': np.array([1]*3)
-        }
-        
         self.x0 = np.array([1.0, 150.0, 0.0])
 
 
-    def simulate(self, time_steps: int) -> SimulationResult:
+    def simulate(self) -> SimulationResult:
         """
         Run the simulation and return the observed states and actions.
         
@@ -84,7 +76,7 @@ class BioProcessSimulator:
         
         env_params = {
             'N': self.T,
-            'tsim': time_steps,
+            'tsim': self.tsim,
             'o_space': self.observation_space,
             'a_space': self.action_space,
             'x0': self.x0,
@@ -108,7 +100,7 @@ class BioProcessSimulator:
         
         obs, _ = self.env.reset()
         done = False
-        num_actions = np.random.randint(0, 5)
+        num_actions = np.random.randint(0, 10)
         
         # Initialize with random action
         initial_action = np.random.uniform(
@@ -132,12 +124,14 @@ class BioProcessSimulator:
                         action = self._normalize_action(action)
                         num_actions -= 1
                     else:
+                        action = actions[-1]
                         action = self._normalize_action(actions[-1])
                         
             obs, _, done, _, info = self.env.step(action)
             con_check, g = self.env.constraint_check(obs, action)
             uncertain_params = obs[3:]
             obs = obs[:3]
+            
             
             
             obs_unnorm = self._unnormalize_observation(obs)
@@ -151,18 +145,17 @@ class BioProcessSimulator:
         
         return self._format_results(observed_states, actions, const_values)
     
-    def run_multiple_simulations(self, num_simulations: int, time_steps: int) -> List[SimulationResult]:
+    def run_multiple_simulations(self, num_simulations: int) -> List[SimulationResult]:
         """
         Run multiple simulations and return results.
         
         Args:
             num_simulations (int): Number of simulations to run
-            time_steps (int): Number of time steps per simulation
             
         Returns:
             List[SimulationResult]: List of simulation results
         """
-        return [self.simulate(time_steps) for _ in range(num_simulations)]
+        return [self.simulate() for _ in range(num_simulations)]
 
     def _normalize_action(self, action: np.ndarray) -> np.ndarray:
         """Normalize action to [-1, 1] range."""
@@ -222,9 +215,9 @@ class BioProcessSimulator:
             results (List[SimulationResult]): List of simulation results
         """
         # Create subplots for observed states
-        fig_obs, axs_obs = plt.subplots(3, 1, figsize=(12, 12))
-        fig_act, axs_act = plt.subplots(2, 1, figsize=(10, 8))
-        fig_con, axs_con = plt.subplots(1, 1, figsize=(10, 8))
+        fig_obs, axs_obs = plt.subplots(3, 1, figsize=(15, 9))
+        fig_act, axs_act = plt.subplots(2, 1, figsize=(12, 8))
+        fig_con, axs_con = plt.subplots(1, 1, figsize=(12, 8))
         
         # Plot observed states
         for i, result in enumerate(results):
@@ -297,6 +290,6 @@ class BioProcessSimulator:
         
         
         
-simulator = BioProcessSimulator(T=240, tsim=20, noise_percentage=0.01)
-simulation_results = simulator.run_multiple_simulations(num_simulations=10, time_steps=20)
-simulator.plot_results(simulation_results)
+# simulator = BioProcessSimulator(T=20, tsim=240, noise_percentage=0.01)
+# simulation_results = simulator.run_multiple_simulations(num_simulations=100)
+# simulator.plot_results(simulation_results)
