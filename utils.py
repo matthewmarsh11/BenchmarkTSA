@@ -248,6 +248,29 @@ class NLL_LSTM(BaseModel):
 
         return pred, var
 
+class MC_LSTM(BaseModel):
+    """LSTM using Monte Carlo Dropout for uncertainty estimation"""
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
+        super().__init__(config)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.lstm = nn.LSTM(
+            self.input_dim, self.config.hidden_dim, self.config.num_layers,
+            batch_first=True, dropout=self.config.dropout
+        )
+        self.dropout = nn.Dropout(p=self.config.dropout)
+        self.fc = nn.Linear(self.config.hidden_dim, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h0 = torch.zeros(self.config.num_layers, x.size(0),
+                        self.config.hidden_dim).to(self.config.device)
+        c0 = torch.zeros(self.config.num_layers, x.size(0),
+                        self.config.hidden_dim).to(self.config.device)
+        
+        lstm_out, _ = self.lstm(x, (h0, c0))
+        dropout_out = self.dropout(lstm_out[:, -1, :])
+        return self.fc(dropout_out)
+
 class ModelTrainer:
     """Handles model training and evaluation"""
     def __init__(self, model: BaseModel, config: TrainingConfig):
@@ -386,6 +409,7 @@ class Visualizer:
             
             if train_var is not None:
                 plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, label='Train Uncertainty')
+            if test_var is not None:
                 plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, label='Test Uncertainty')
             
             plt.show()
@@ -464,6 +488,30 @@ class QuantileTransform:
         # Stack the predictions along the last axis
         return quantile_preds
 
+class MC_Prediction:
+    def __init__(self, model, config, num_samples):
+        self.model = model
+        self.config = config
+        self.num_samples = num_samples
+
+    def enable_dropout(self, m):
+        if type(m) == nn.Dropout:
+            m.train()
+    
+    def predict(self, data):
+        self.model.eval()
+        self.model.apply(self.enable_dropout)
+        predictions = torch.zeros((self.num_samples, data.size(0), self.model.output_dim))
+        print(predictions.shape)
+        
+        with torch.no_grad():
+            for i in range(self.num_samples):
+                predictions[i] = self.model(data)
+                
+        pred_mean = predictions.mean(dim=0)
+        pred_var = predictions.var(dim=0)
+        return pred_mean.numpy(), pred_var.numpy()
+
 from CSTR_Sim import *
 from Bioprocess_Sim import *
 
@@ -502,16 +550,16 @@ def main():
     #     output_dim=y_train.shape[1],
     # )
     quantiles = [0.1, 0.5, 0.9]
-    model = NLL_LSTM(
+    model = MC_LSTM(
         config=training_config,
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[1]
     )
 
     # Train model
-    # criterion = nn.MSELoss()
+    criterion = nn.MSELoss()
     # criterion = QuantileLoss(quantiles)
-    criterion = nn.GaussianNLLLoss()
+    # criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     history = trainer.train(train_loader, test_loader, criterion)
     
@@ -532,13 +580,21 @@ def main():
 
     # train_pred = inverse_transformer.inverse_transform(train_pred)
     # test_pred = inverse_transformer.inverse_transform(test_pred)
+    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
+    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    # train_var = data_processor.target_scaler.inverse_transform(train_var)
+    # test_var = data_processor.target_scaler.inverse_transform(test_var)
+    y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
+    y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
+    
+    mc_predictor = MC_Prediction(model, training_config, num_samples=100)
+    train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
+    test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
+    
     train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    print(train_pred)
     test_pred = data_processor.target_scaler.inverse_transform(test_pred)
     train_var = data_processor.target_scaler.inverse_transform(train_var)
     test_var = data_processor.target_scaler.inverse_transform(test_var)
-    y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
-    y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
 
     # Visualize results
     feature_names = ['c_x', 'c_n', 'c_q']
