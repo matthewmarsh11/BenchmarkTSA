@@ -223,6 +223,31 @@ class QuantileLSTM(BaseModel):
         
         return predictions.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
 
+class NLL_LSTM(BaseModel):
+    """LSTM using NLL Likelihood Loss Function, for Gaussian Likelihood, 
+       contains second FC layer for log variance"""
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
+        super().__init__(config)
+        self.lstm = nn.LSTM(
+            input_dim, self.config.hidden_dim, self.config.num_layers,
+            batch_first=True, dropout=self.config.dropout
+        )
+        self.fc_mean = nn.Linear(self.config.hidden_dim, output_dim) # Fully connected layer for mean prediction
+        self.fc_logvar = nn.Linear(self.config.hidden_dim, output_dim) # Fully connected layer for log variance prediction
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h0 = torch.zeros(self.config.num_layers, x.size(0),
+                        self.config.hidden_dim).to(self.config.device)
+        c0 = torch.zeros(self.config.num_layers, x.size(0),
+                        self.config.hidden_dim).to(self.config.device)
+        
+        lstm_out, _ = self.lstm(x, (h0, c0))
+        pred = self.fc_mean(lstm_out[:, -1, :]) # Mean prediction from model
+        logvar = self.fc_logvar(lstm_out[:, -1, :])
+        var = torch.exp(logvar) # Variance is exponent of logvar
+
+        return pred, var
+
 class ModelTrainer:
     """Handles model training and evaluation"""
     def __init__(self, model: BaseModel, config: TrainingConfig):
@@ -239,11 +264,17 @@ class ModelTrainer:
         for epoch in range(self.config.num_epochs):
             # Training
             self.model.train()
-            train_loss = self._train_epoch(train_loader, criterion, optimizer)
+            if isinstance(criterion, nn.GaussianNLLLoss):
+                train_loss = self._NLL_train_epoch(train_loader, criterion, optimizer)
+            else:
+                train_loss = self._train_epoch(train_loader, criterion, optimizer)
             
             # Validation
             self.model.eval()
-            test_loss = self._validate_epoch(test_loader, criterion)
+            if isinstance(criterion, nn.GaussianNLLLoss):
+                test_loss = self._NLL_validate_epoch(test_loader, criterion)
+            else:
+                test_loss = self._validate_epoch(test_loader, criterion)
             
             history['train_loss'].append(train_loss)
             history['test_loss'].append(test_loss)
@@ -266,6 +297,19 @@ class ModelTrainer:
             optimizer.step()
             total_loss += loss.item()
         return total_loss
+    
+    def _NLL_train_epoch(self, train_loader: DataLoader, criterion: nn.Module,
+                        optimizer: torch.optim.Optimizer) -> float:
+        total_loss = 0
+        for batch_X, batch_y in train_loader:
+            batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+            optimizer.zero_grad()
+            mean, var = self.model(batch_X)
+            loss = criterion(mean, batch_y, var)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        return total_loss
 
     def _validate_epoch(self, test_loader: DataLoader, criterion: nn.Module) -> float:
         total_loss = 0
@@ -277,6 +321,16 @@ class ModelTrainer:
                 total_loss += loss.item()
         return total_loss
 
+    def _NLL_validate_epoch(self, test_loader: DataLoader, criterion: nn.Module) -> float:
+        total_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in test_loader:
+                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                mean, var = self.model(batch_X)
+                loss = criterion(mean, batch_y, var)
+                total_loss += loss.item()
+        return total_loss
+
 class Visualizer:
     """Handles visualization of results."""
     
@@ -284,7 +338,7 @@ class Visualizer:
     def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
                          test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
                          y_train: np.ndarray, y_test: np.ndarray,
-                         feature_names: list, num_simulations: int):
+                         feature_names: list, num_simulations: int, train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
         """
         Plots predictions and ground truth data.
         
@@ -298,12 +352,12 @@ class Visualizer:
         """
         
         feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
+        train_pred_new = None
         if isinstance(train_pred, dict):
             train_pred_new = train_pred
             test_pred_new = test_pred
             train_pred = train_pred[0.5]
             test_pred = test_pred[0.5]
-
             
         for i, sim in enumerate(feature_names):
             plt.figure(figsize=(10, 6))
@@ -329,9 +383,13 @@ class Visualizer:
                 min_key = min(keys)
                 plt.fill_between(range(len(train_pred)), train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, label='Train Uncertainty')
                 plt.fill_between(range(offset, offset + len(test_pred)), test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', alpha=0.2, label='Test Uncertainty')
+            
+            if train_var is not None:
+                plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, label='Train Uncertainty')
+                plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, label='Test Uncertainty')
+            
             plt.show()
-
-        
+   
 class QuantileLoss(nn.Module):
     def __init__(self, quantiles):
         super(QuantileLoss, self).__init__()
@@ -444,41 +502,48 @@ def main():
     #     output_dim=y_train.shape[1],
     # )
     quantiles = [0.1, 0.5, 0.9]
-    model = QuantileLSTM(
+    model = NLL_LSTM(
         config=training_config,
         input_dim=X_train.shape[2],
-        output_dim=y_train.shape[1] * 3,
-        quantiles=quantiles
+        output_dim=y_train.shape[1]
     )
 
     # Train model
     # criterion = nn.MSELoss()
-    criterion = QuantileLoss(quantiles)
+    # criterion = QuantileLoss(quantiles)
+    criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     history = trainer.train(train_loader, test_loader, criterion)
     
     # Make predictions
     model.eval()
     with torch.no_grad():
-        train_pred = model(X_train.to(training_config.device)).cpu().numpy()
-        test_pred = model(X_test.to(training_config.device)).cpu().numpy()
-        print(train_pred.shape)
+        if isinstance(criterion, nn.GaussianNLLLoss):
+            train_pred, train_var = model(X_train.to(training_config.device))
+            test_pred, test_var = model(X_test.to(training_config.device))
+        else:
+            train_pred = model(X_train.to(training_config.device)).cpu().numpy()
+            test_pred = model(X_test.to(training_config.device)).cpu().numpy()
+            print(train_pred.shape)
 
     # Inverse transform predictions
     scaler = data_processor.target_scaler
-    inverse_transformer = QuantileTransform(quantiles, scaler)
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
 
-    train_pred = inverse_transformer.inverse_transform(train_pred)
-    test_pred = inverse_transformer.inverse_transform(test_pred)
-    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    # train_pred = inverse_transformer.inverse_transform(train_pred)
+    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    train_pred = data_processor.target_scaler.inverse_transform(train_pred)
+    print(train_pred)
+    test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    train_var = data_processor.target_scaler.inverse_transform(train_var)
+    test_var = data_processor.target_scaler.inverse_transform(test_var)
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
 
     # Visualize results
     feature_names = ['c_x', 'c_n', 'c_q']
     visualizer = Visualizer()
-    visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, Biop_sim_config.n_simulations)
+    visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, Biop_sim_config.n_simulations, train_var, test_var)
 
 if __name__ == "__main__":
     main()
