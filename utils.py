@@ -83,7 +83,7 @@ class CSTRConverter(SimulationConverter):
         targets = np.column_stack(all_targets)
 
         return features, targets
-    
+
 class BioprocessConverter(SimulationConverter):
     def convert(self, data: List[Tuple[Dict, Dict, Dict]]) -> Tuple[np.ndarray, np.ndarray]:
         """Converts the process simulation data into features and targets
@@ -202,26 +202,26 @@ class StandardLSTM(BaseModel):
 
 class QuantileLSTM(BaseModel):
     """LSTM with quantile regression capabilities"""
-    def __init__(self, config: TrainingConfig, input_dim: int, hidden_dim: int, 
-                 num_layers: int, output_dim: int, quantiles: List[float], dropout: float = 0.2):
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int, quantiles: List[float]):
         super().__init__(config)
         self.quantiles = quantiles
-        self.lstm = nn.LSTM(
-            input_dim, hidden_dim, num_layers,
-            batch_first=True, dropout=dropout
-        )
-        self.fc = nn.Linear(hidden_dim, len(quantiles) * output_dim)
         self.output_dim = output_dim
-
+        self.lstm = nn.LSTM(
+            input_dim, self.config.hidden_dim, self.config.num_layers,
+            batch_first=True, dropout=self.config.dropout
+        )
+        self.fc = nn.Linear(self.config.hidden_dim, self.output_dim)
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.lstm.num_layers, x.size(0), 
-                        self.lstm.hidden_size).to(self.config.device)
-        c0 = torch.zeros(self.lstm.num_layers, x.size(0), 
-                        self.lstm.hidden_size).to(self.config.device)
+        h0 = torch.zeros(self.config.num_layers, x.size(0), 
+                        self.config.hidden_dim).to(self.config.device)
+        c0 = torch.zeros(self.config.num_layers, x.size(0), 
+                        self.config.hidden_dim).to(self.config.device)
         
         lstm_out, _ = self.lstm(x, (h0, c0))
         predictions = self.fc(lstm_out[:, -1, :])
-        return predictions.view(-1, len(self.quantiles), self.output_dim)
+        
+        return predictions.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
 
 class ModelTrainer:
     """Handles model training and evaluation"""
@@ -281,7 +281,8 @@ class Visualizer:
     """Handles visualization of results."""
     
     @staticmethod
-    def plot_predictions(train_pred: np.ndarray, test_pred: np.ndarray,
+    def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
+                         test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
                          y_train: np.ndarray, y_test: np.ndarray,
                          feature_names: list, num_simulations: int):
         """
@@ -296,14 +297,14 @@ class Visualizer:
             num_simulations (int): Number of simulations in the data.
         """
         
-        # Identify the unique variables and their corresponding columns
-        # variable_groups = {}
-        # for idx, name in enumerate(feature_names):
-        #     if name not in variable_groups:
-        #         variable_groups[name] = []
-        #     variable_groups[name].append(num_simulations)
-        # print(variable_groups)
         feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
+        if isinstance(train_pred, dict):
+            train_pred_new = train_pred
+            test_pred_new = test_pred
+            train_pred = train_pred[0.5]
+            test_pred = test_pred[0.5]
+
+            
         for i, sim in enumerate(feature_names):
             plt.figure(figsize=(10, 6))
             # Plot training predictions and ground truth
@@ -322,7 +323,88 @@ class Visualizer:
             plt.ylabel(sim)
             plt.legend(loc='upper right', bbox_to_anchor=(1.05, 1), ncol=1)
             plt.tight_layout()
+            if train_pred_new:
+                keys = train_pred_new.keys()
+                max_key = max(keys)
+                min_key = min(keys)
+                plt.fill_between(range(len(train_pred)), train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, label='Train Uncertainty')
+                plt.fill_between(range(offset, offset + len(test_pred)), test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', alpha=0.2, label='Test Uncertainty')
             plt.show()
+
+        
+class QuantileLoss(nn.Module):
+    def __init__(self, quantiles):
+        super(QuantileLoss, self).__init__()
+        self.quantiles = quantiles
+
+    def forward(self, preds, target):
+        """
+        Computes the quantile loss.
+
+        Args:
+            preds (torch.Tensor): Predicted quantiles of shape (batch_size, features * quantiles)
+            target (torch.Tensor): Ground truth of shape (batch_size, features)
+
+        Returns:
+            torch.Tensor: The mean quantile loss.
+        """
+        # Reshape predictions to (batch_size, features, quantiles)
+        num_features = target.size(1)
+        preds = preds.view(-1, num_features, len(self.quantiles))
+
+        assert not target.requires_grad
+        assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
+        assert preds.size(1) == target.size(1), "Feature dimension mismatch between preds and target"
+
+        # Initialize list to store losses for each quantile
+        losses = []
+
+        # Compute loss for each quantile
+        for i, q in enumerate(self.quantiles):
+            # Select the predictions for the i-th quantile
+            pred_q = preds[:, :, i]  # Shape: (batch_size, features)
+
+            # Compute the error (difference) between target and predicted quantile
+            errors = target - pred_q
+
+            # Quantile loss formula
+            loss_q = torch.max((q - 1) * errors, q * errors)
+
+            # Add the loss for this quantile to the list
+            losses.append(loss_q.mean())
+
+        # Mean loss across all quantiles
+        total_loss = torch.stack(losses).mean()
+        return total_loss
+
+class QuantileTransform:
+    def __init__(self, quantiles: List[float], scaler):
+        
+        self.quantiles = quantiles
+        self.num_quantiles = len(quantiles)
+        self.scaler = scaler
+        
+    def inverse_transform(self, preds):
+        """
+        Inverse transform the predictions from quantile space to original space.
+
+        Args:
+            preds (np.ndarray): Predictions of shape (batch_size, features * quantiles)
+
+        Returns:
+            np.ndarray: Predictions in original space of shape (batch_size, features)
+        """
+
+        # Initialize list to store inverse transformed predictions
+        quantile_preds = {}
+        # Inverse transform each quantile prediction
+        for i, q in enumerate(self.quantiles):
+            pred_q = preds[:, :, i]
+            pred_q = self.scaler.inverse_transform(pred_q)
+            quantile_preds[q] = pred_q # Shape: {quantile: (time_steps, features)}
+        
+        # Stack the predictions along the last axis
+        return quantile_preds
 
 from CSTR_Sim import *
 from Bioprocess_Sim import *
@@ -356,14 +438,22 @@ def main():
      y_train, y_test) = data_processor.prepare_data(features, targets)
 
     # Initialize model (example with StandardLSTM)
-    model = StandardLSTM(
+    # model = StandardLSTM(
+    #     config=training_config,
+    #     input_dim=X_train.shape[2],
+    #     output_dim=y_train.shape[1],
+    # )
+    quantiles = [0.1, 0.5, 0.9]
+    model = QuantileLSTM(
         config=training_config,
         input_dim=X_train.shape[2],
-        output_dim=y_train.shape[1],
+        output_dim=y_train.shape[1] * 3,
+        quantiles=quantiles
     )
 
     # Train model
-    criterion = nn.MSELoss()
+    # criterion = nn.MSELoss()
+    criterion = QuantileLoss(quantiles)
     trainer = ModelTrainer(model, training_config)
     history = trainer.train(train_loader, test_loader, criterion)
     
@@ -375,11 +465,15 @@ def main():
         print(train_pred.shape)
 
     # Inverse transform predictions
-    train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    scaler = data_processor.target_scaler
+    inverse_transformer = QuantileTransform(quantiles, scaler)
+
+    train_pred = inverse_transformer.inverse_transform(train_pred)
+    test_pred = inverse_transformer.inverse_transform(test_pred)
+    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
+    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
-    print(train_pred.shape)
 
     # Visualize results
     feature_names = ['c_x', 'c_n', 'c_q']
