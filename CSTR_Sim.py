@@ -22,7 +22,8 @@ class SimulationConfig:
     tsim: int
     noise_percentage: float = 0.01
 
-class CSTRSimulator:
+    
+class CSTRSimulator():
     def __init__(
         self,
         config
