@@ -15,10 +15,12 @@ from torch.distributions import Normal
 import GPyOpt
 from GPyOpt.methods import BayesianOptimization
 from tqdm import tqdm
-from base import TrainingConfig, BaseModel
+from base import TrainingConfig, BaseModel, CNNConfig, LSTMConfig
 from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
+from dataclasses import fields
+np.random.seed(42)
 
 @dataclass
 class ConformityScore:
@@ -320,7 +322,19 @@ class Visualizer:
                 plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
             
             plt.show()
-   
+            
+    @staticmethod
+    def plot_loss(history: Dict[float, np.ndarray]):
+        """Plots the loss history for a model"""
+        plt.figure(figsize=(10, 6))
+        for key, loss in history.items():
+            plt.plot(loss, label=key)
+        plt.title('Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.show()
+
 class QuantileLoss(nn.Module):
     def __init__(self, quantiles):
         super(QuantileLoss, self).__init__()
@@ -626,14 +640,18 @@ class ModelEvaluator:
 
 class ModelOptimisation:
     """Class for optimising parameters and hyperparameters of the model"""
-    def __init__(self, model_class: BaseModel, sim_config: SimulationConfig, train_config: TrainingConfig, 
-                 config_bounds: Dict[str, Tuple[float, float]],
-                 simulator, converter: SimulationConverter, data_processor: DataProcessor,
-                 trainer_class: ModelTrainer, iters: int = 100, quantiles: Optional[List[float]] = None, monte_carlo = None):
+    def __init__(self, model_class: BaseModel, sim_config: SimulationConfig, 
+                train_config: TrainingConfig, model_config: Union[CNNConfig, LSTMConfig],
+                config_bounds: Dict[str, Union[Tuple[float, float], List[Tuple[float, float]]]], # Modified to handle lists of bounds
+                simulator, converter: SimulationConverter, data_processor: DataProcessor,
+                trainer_class: ModelTrainer, iters: int = 100, quantiles: Optional[List[float]] = None, 
+                monte_carlo = None):
+        
         self.model_class = model_class
         self.sim_config = sim_config
         self.config_bounds = config_bounds
         self.train_config = train_config
+        self.model_config = model_config
         self.data_processor = data_processor
         self.simulator = simulator(self.sim_config)
         self.trainer_class = trainer_class
@@ -641,45 +659,106 @@ class ModelOptimisation:
         self.iters = iters
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
-        self.domain = [{'name': 'hidden_dim', 'type': 'discrete', 'domain': range(self.config_bounds['hidden_dim'][0], self.config_bounds['hidden_dim'][1])},
-                {'name': 'num_layers', 'type': 'discrete', 'domain': range(self.config_bounds['num_layers'][0], self.config_bounds['num_layers'][1])},
-                {'name': 'dropout', 'type': 'continuous', 'domain': (self.config_bounds['dropout'][0], self.config_bounds['dropout'][1])},
-                {'name': 'learning_rate', 'type': 'continuous', 'domain': (self.config_bounds['learning_rate'][0], self.config_bounds['learning_rate'][1])},
-                {'name': 'batch_size', 'type': 'discrete', 'domain': range(self.config_bounds['batch_size'][0], self.config_bounds['batch_size'][1])},
-                {'name': 'num_epochs', 'type': 'discrete', 'domain': range(self.config_bounds['num_epochs'][0], self.config_bounds['num_epochs'][1])},
-                {'name': 'time_step', 'type': 'discrete', 'domain': range(self.config_bounds['time_step'][0], self.config_bounds['time_step'][1])}]
+        self.domain = self._create_domain()
+        print(self.domain)
 
-    
+
+    def _create_domain(self):
+        """Create domain specification for Bayesian optimization"""
+        domain = []
+        
+        for name, bounds in self.config_bounds.items():
+            print(name)
+            print(bounds)
+            if isinstance(bounds, tuple):  # Single parameter bounds
+                # param_type = 'discrete' if isinstance(getattr(self.train_config, name, 0), int) or \
+                #             isinstance(getattr(self.model_config, name, 0), int) else 'continuous'
+                param_type = 'continuous' if name == 'learning_rate' or name == 'dropout' else 'discrete'
+                if param_type == 'discrete':
+                    domain.append({
+                        'name': name,
+                        'type': 'discrete',
+                        'domain': list(range(int(bounds[0]), int(bounds[1]) + 1))  # +1 to include upper bound
+                    })
+                else:
+                    domain.append({
+                        'name': name,
+                        'type': 'continuous',
+                        'domain': bounds
+                    })
+            elif isinstance(bounds, list):  # List parameter bounds (for CNN)
+                for i, bound in enumerate(bounds):
+                    domain.append({
+                        'name': f'{name}_{i}',
+                        'type': 'discrete',
+                        'domain': list(range(int(bound[0]), int(bound[1]) + 1))  # +1 to include upper bound
+                    })
+        
+        return domain
+
     def objective_function (self, x):
         # Initialise the hyperparameters to be optimised
-        self.train_config.hidden_dim = int(x[:, 0])
-        self.train_config.num_layers = int(x[:, 1])
-        self.train_config.dropout = float(x[:, 2])
-        self.train_config.learning_rate = float(x[:, 3])
-        self.train_config.batch_size = int(x[:, 4])
-        self.train_config.num_epochs = int(x[:, 5])
-        self.train_config.time_step = int(x[:, 6])
+        # self.train_config.hidden_dim = int(x[:, 0])
+        # self.train_config.num_layers = int(x[:, 1])
+        # self.train_config.dropout = float(x[:, 2])
+        # self.train_config.learning_rate = float(x[:, 3])
+        # self.train_config.batch_size = int(x[:, 4])
+        # self.train_config.num_epochs = int(x[:, 5])
+        # self.train_config.time_step = int(x[:, 6])
         
-        # Run the simulation
+        # # Run the simulation
+        # simulation_results = self.simulator.run_multiple_simulations()
+        # features, targets = self.converter.convert(simulation_results)
+        current_idx = 0
+        print(self.config_bounds)
+        # Process each parameter according to its type
+        for name, bounds in self.config_bounds.items():
+            if isinstance(bounds, tuple):  # Single parameter
+                value = x[:, current_idx]
+                current_idx += 1
+                
+                # Determine which config object to update
+                if hasattr(self.train_config, name):
+                    config_obj = self.train_config
+                else:
+                    config_obj = self.model_config
+                    
+                # Set the value with appropriate type
+                if isinstance(getattr(config_obj, name), int):
+                    setattr(config_obj, name, int(value))
+                else:
+                    setattr(config_obj, name, float(value))
+                    
+            elif isinstance(bounds, list):  # List parameter (for CNN)
+                num_values = len(bounds)
+                values = [x[:, current_idx + i] for i in range(num_values)]
+                current_idx += num_values
+                
+                # Convert to appropriate type (assuming int for CNN parameters)
+                values = [int(v) for v in values]
+                setattr(self.model_config, name, values)
+
+        # Rest of your existing objective function code...
         simulation_results = self.simulator.run_multiple_simulations()
-        features, targets = self.converter.convert(simulation_results)
+        features, targets = self.converter.convert(simulation_results)        
+
         data_processor = self.data_processor(self.train_config)
         (train_loader, test_loader, X_train, X_test,
          y_train, y_test) = data_processor.prepare_data(features, targets)
         
         
         # Depending on which model, initialise the model parameters and loss function
-        if self.model_class == QuantileLSTM:
-            self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
+        if self.model_class == QuantileLSTM or self.model_class == QuantileCNN:
+            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1], quantiles = self.quantiles)
             criterion = QuantileLoss(self.quantiles)
         elif self.model_class == NLL_LSTM:
             criterion = nn.GaussianNLLLoss()
-            self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
+            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1])
         else:
             criterion = nn.MSELoss()
-            self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
+            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1])
         
         # Train the model
@@ -715,8 +794,54 @@ class ModelOptimisation:
                 if optimizer.fx_opt < best_loss:
                     best_loss = optimizer.fx_opt
                     best_params = optimizer.x_opt
+                    best_params = self.decode_parameters(best_params)
                 
         return best_params
+    
+    def decode_parameters(self, x: torch.Tensor):
+        """
+        Decode the values of x into corresponding parameters and save them as a dictionary.
+        
+        Parameters:
+        - x: torch.Tensor, Encoded parameters.
+        - config_bounds: dict, Dictionary of parameter names and their bounds (tuple or list).
+        - train_config: Object, Training configuration object.
+        - model_config: Object, Model configuration object.
+        
+        Returns:
+        - decoded_params: dict, Decoded parameters as a dictionary.
+        """
+        current_idx = 0
+        decoded_params = {}
+
+        for name, bounds in self.config_bounds.items():
+            if isinstance(bounds, tuple):  # Single parameter
+                value = x[current_idx]
+                current_idx += 1
+                
+                # Determine which config object the parameter belongs to
+                if hasattr(self.train_config, name):
+                    config_obj = self.train_config
+                else:
+                    config_obj = self.model_config
+                
+                # Decode value with appropriate type
+                if isinstance(getattr(config_obj, name), int):
+                    decoded_value = int(value)
+                else:
+                    decoded_value = float(value)
+                
+                decoded_params[name] = decoded_value
+            
+            elif isinstance(bounds, list):  # List parameter (e.g., for CNN)
+                num_values = len(bounds)
+                values = [x[current_idx + i] for i in range(num_values)]
+                current_idx += num_values
+                
+                # Convert to appropriate type (assuming int for list values)
+                decoded_params[name] = [int(v) for v in values]
+        
+        return decoded_params
 
 class ConformalQuantiles:
     """Class for calculating conformal quantiles based off test set predictions"""
@@ -751,6 +876,142 @@ class ConformalQuantiles:
         rank_residuals = np.argsort(residuals, axis=0)
         return rank_residuals
     
+class ConformalRegressor:
+    """
+    Implementation of various conformal prediction methods for regression.
+    Supports both split-conformal and cross-conformal approaches.
+    """
+    def __init__(self, base_model: nn.Module, inverse_transformer, alpha: float = 0.1):
+        self.base_model = base_model
+        self.inverse_transformer = inverse_transformer
+        self.alpha = alpha
+        self.conformity_scores = ConformityScore()
+        self.calibration_scores = None
+        
+    def _compute_absolute_residuals(self, y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+        """Compute absolute residuals |y - ŷ|"""
+        return np.abs(y_true - y_pred)
+    
+    def _compute_normalized_residuals(self, y_true: np.ndarray, y_pred: np.ndarray, 
+                                    sigma: np.ndarray) -> np.ndarray:
+        """Compute normalized residuals |y - ŷ|/σ"""
+        return np.abs(y_true - y_pred) / sigma
+    
+    def _compute_cumulative_residuals(self, y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+        """Compute cumulative distribution residuals"""
+        residuals = y_true - y_pred
+        return np.array([np.mean(residuals <= r) for r in residuals])
+    
+    def _compute_quantile_scores(self, y_true: np.ndarray, 
+                               quantile_preds: Dict[float, np.ndarray]) -> np.ndarray:
+        """Compute conformity scores for quantile regression"""
+        scores = []
+        for q, pred in quantile_preds.items():
+            residual = y_true - pred
+            score = np.maximum(q * residual, (q - 1) * residual)
+            scores.append(score)
+        return np.mean(scores, axis=0)
+
+    def fit_calibrate(self, X_calib: torch.Tensor, y_calib: np.ndarray, 
+                     method: str = 'absolute') -> None:
+        """
+        Fit the conformal predictor using calibration data.
+        
+        Args:
+            X_calib: Calibration features
+            y_calib: True calibration targets
+            method: Conformity score method ('absolute', 'normalized', 'cumulative', 'quantile')
+        """
+        with torch.no_grad():
+            if hasattr(self.base_model, 'quantiles'):
+                y_pred = self.base_model(X_calib)
+                quantile_preds = self.base_model.transform.inverse_transform(y_pred)
+                scores = self._compute_quantile_scores(y_calib, quantile_preds)
+            else:
+                y_pred = self.base_model(X_calib).cpu().numpy()
+                
+                if method == 'absolute':
+                    scores = self._compute_absolute_residuals(y_calib, y_pred)
+                elif method == 'normalized':
+                    # Estimate σ using MAD
+                    residuals = y_calib - y_pred
+                    mad = np.median(np.abs(residuals - np.median(residuals)))
+                    sigma = 1.4826 * mad  # Consistent estimator for Gaussian data
+                    scores = self._compute_normalized_residuals(y_calib, y_pred, sigma)
+                elif method == 'cumulative':
+                    scores = self._compute_cumulative_residuals(y_calib, y_pred)
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+
+        # Store calibration scores
+        self.calibration_scores = scores
+        
+    def predict(self, X: torch.Tensor, method: str = 'absolute') -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute prediction intervals using conformal prediction.
+        
+        Args:
+            X: Input features
+            method: Conformity score method
+            
+        Returns:
+            Tuple containing lower and upper bounds of the prediction interval
+        """
+        if self.calibration_scores is None:
+            raise ValueError("Must call fit_calibrate before predict")
+            
+        with torch.no_grad():
+            y_pred = self.base_model(X).cpu().numpy()
+            
+        # Compute quantile of conformity scores
+        q = np.quantile(self.calibration_scores, 1 - self.alpha)
+        
+        if method == 'absolute':
+            lower = y_pred - q
+            upper = y_pred + q
+        elif method == 'normalized':
+            # Estimate σ for test points using similar approach as calibration
+            residuals = self.calibration_scores  # Using calibration residuals
+            mad = np.median(np.abs(residuals - np.median(residuals)))
+            sigma = 1.4826 * mad
+            lower = y_pred - q * sigma
+            upper = y_pred + q * sigma
+        elif method == 'cumulative':
+            # For cumulative method, use empirical quantiles
+            lower = np.percentile(y_pred, self.alpha/2 * 100)
+            upper = np.percentile(y_pred, (1 - self.alpha/2) * 100)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+            
+        return lower, upper
+    
+    def predict_quantile(self, X: torch.Tensor) -> Dict[str, np.ndarray]:
+        """
+        Compute prediction intervals using quantile regression with conformal calibration.
+        
+        Args:
+            X: Input features
+            
+        Returns:
+            Dictionary containing predicted quantiles and conformal intervals
+        """
+        if not hasattr(self.base_model, 'quantiles'):
+            raise ValueError("Base model must be a quantile regression model")
+            
+        with torch.no_grad():
+            y_pred = self.base_model(X)
+            quantile_preds = self.inverse_transformer.inverse_transform(y_pred)
+            
+        # Compute conformally calibrated intervals
+        q = np.quantile(self.calibration_scores, 1 - self.alpha)
+        
+        results = {
+            'quantiles': quantile_preds,
+            'conformal_lower': quantile_preds[min(self.base_model.quantiles)] - q,
+            'conformal_upper': quantile_preds[max(self.base_model.quantiles)] + q
+        }
+        
+        return results
 
 
 def main():
@@ -759,22 +1020,31 @@ def main():
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
-        num_epochs=164,
+        num_epochs=200,
         learning_rate=0.001,
-        time_step=7,
-        num_layers=1,
-        hidden_dim=106,
-        dropout=0.1
+        time_step=10,
     )
-    np.random.seed(42)
+    LSTM_Config = LSTMConfig(
+        hidden_dim=64,
+        num_layers=2,
+        dropout=0.2,
+    )
+    CNN_Config = CNNConfig(
+        conv_channels = [16, 32],
+        kernel_sizes = [5, 3],
+        fc_dims = [101, 128],
+        dropout = 0.1
+        )
+    
+
     # Initialize components
 
-    simulator = CSTRSimulator(CSTR_sim_config)
-    # simulator = BioProcessSimulator(Biop_sim_config)
+    # simulator = CSTRSimulator(CSTR_sim_config)
+    simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
     simulation_results = simulator.run_multiple_simulations()
-    converter = CSTRConverter()
-    # converter = BioprocessConverter()
+    # converter = CSTRConverter()
+    converter = BioprocessConverter()
     features, targets = converter.convert(simulation_results)
     
     data_processor = DataProcessor(training_config)
@@ -783,16 +1053,16 @@ def main():
      y_train, y_test) = data_processor.prepare_data(features, targets)
 
     # Initialize model (example with StandardLSTM)
-    # model = StandardLSTM(
+    # model = StandardCNN(
     #     config=training_config,
     #     input_dim=X_train.shape[2],
     #     output_dim=y_train.shape[1],
     # )
-    quantiles = [0.25, 0.5, 0.75]
-    model = QuantileLSTM(
-        config=training_config,
+    quantiles = [0.01, 0.5, 0.99]
+    model = QuantileCNN(
+        config=CNN_Config,
         input_dim=X_train.shape[2],
-        output_dim=y_train.shape[1], quantiles=quantiles
+        output_dim=y_train.shape[1], quantiles = quantiles
     )
 
     # Train model
@@ -801,7 +1071,6 @@ def main():
     # criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
-    
     # Make predictions
     model.eval()
     with torch.no_grad():
@@ -834,18 +1103,44 @@ def main():
     # test_var = data_processor.target_scaler.inverse_transform(test_var)
 
     # Visualize results
-    # feature_names = ['c_x', 'c_n', 'c_q']
-    feature_names = ['temperature', 'concentration']
+    feature_names = ['c_x', 'c_n', 'c_q']
+    # feature_names = ['temperature', 'concentration']
     visualizer = Visualizer()
     visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, Biop_sim_config.n_simulations)
-    # model_class = QuantileLSTM
+    visualizer.plot_loss(history)
+    # model_class = QuantileCNN
     # trainer_class = ModelTrainer
-    # optimizer = ModelOptimisation(model_class, Biop_sim_config, training_config, 
-    #                               config_bounds={'hidden_dim': (32, 128), 'num_layers': (1, 3), 
-    #                                              'dropout': (0.1, 0.5), 'learning_rate': (0.001, 0.1), 
-    #                                              'batch_size': (5, 10), 'num_epochs': (50, 200), 
-    #                                              'time_step': (5, 10)},
-    #                               simulator=BioProcessSimulator, converter=BioprocessConverter, 
+    
+    # CNN_config_bounds = {
+    #     # Training config bounds
+    #     'batch_size': (5, 10),
+    #     'num_epochs': (50, 200),
+    #     'learning_rate': (0.001, 0.1),
+    #     'time_step': (5, 10),
+        
+    #     # CNN specific bounds
+    #     'conv_channels': [(16, 32), (32, 64)],  # bounds for each conv layer
+    #     'kernel_sizes': [(3, 5), (3, 7)],       # bounds for each kernel size
+    #     'fc_dims': [(64, 128), (128, 256)],     # bounds for each FC layer
+    #     'dropout': (0.1, 0.9)
+    # }
+    
+    # LSTM_config_bounds = {
+    #     # Training config bounds
+    #     'batch_size': (5, 10),
+    #     'num_epochs': (50, 200),
+    #     'learning_rate': (0.001, 0.1),
+    #     'time_step': (5, 10),
+        
+    #     # LSTM specific bounds
+    #     'hidden_dim': (32, 128),
+    #     'num_layers': (1, 3),
+    #     'dropout': (0.1, 0.9),
+    # }
+    
+    
+    # optimizer = ModelOptimisation(model_class, Biop_sim_config, training_config, CNN_Config,
+    #                               config_bounds=CNN_config_bounds, simulator=BioProcessSimulator, converter=BioprocessConverter, 
     #                               data_processor=DataProcessor, trainer_class=trainer_class, quantiles=quantiles, monte_carlo=None)
     
     # best_params = optimizer.optimise()
@@ -853,6 +1148,5 @@ def main():
     
     conformal = ConformalQuantiles(y_test_orig, test_pred, 0.95)
     intervals = conformal.calculate_intervals()
-    print(intervals)
 if __name__ == "__main__":
     main()
