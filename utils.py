@@ -5,29 +5,28 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
-from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass
 import pandas as pd
 from scipy import stats
+from scipy.stats import norm
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from torch.distributions import Normal
 import GPyOpt
 from GPyOpt.methods import BayesianOptimization
 from tqdm import tqdm
+from base import TrainingConfig, BaseModel
+from models import *
+from Bioprocess_Sim import *
+from CSTR_Sim import *
 
 @dataclass
-class TrainingConfig:
-    """Configuration for model training"""
-    batch_size: int
-    num_epochs: int
-    learning_rate: float
-    time_step: int
-    num_layers: int
-    hidden_dim: int
-    dropout: float = 0.2
-    train_test_split: float = 0.8
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+class ConformityScore:
+    """Store different types of conformity scores for regression"""
+    absolute_residual: Optional[np.ndarray] = None
+    signed_residual: Optional[np.ndarray] = None
+    normalized_residual: Optional[np.ndarray] = None
+    cumulative_residual: Optional[np.ndarray] = None
 
 @dataclass
 class SimulationConfig:
@@ -176,106 +175,6 @@ class DataProcessor:
 
         return train_loader, test_loader, X_train, X_test, y_train, y_test
 
-class BaseModel(nn.Module, ABC):
-    """Abstract base class for all models"""
-    def __init__(self, config: TrainingConfig):
-        super().__init__()
-        self.config = config
-
-    @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
-
-class StandardLSTM(BaseModel):
-    """Standard LSTM implementation"""
-    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
-        super().__init__(config)
-        self.lstm = nn.LSTM(
-            input_dim, self.config.hidden_dim, self.config.num_layers,
-            batch_first=True, dropout=self.config.dropout
-        )
-        self.fc = nn.Linear(self.config.hidden_dim, output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.config.num_layers, x.size(0), 
-                        self.config.hidden_dim).to(self.config.device)
-        c0 = torch.zeros(self.config.num_layers, x.size(0), 
-                        self.config.hidden_dim).to(self.config.device)
-        
-        lstm_out, _ = self.lstm(x, (h0, c0))
-        return self.fc(lstm_out[:, -1, :])
-
-class QuantileLSTM(BaseModel):
-    """LSTM with quantile regression capabilities"""
-    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int, quantiles: List[float]):
-        super().__init__(config)
-        self.quantiles = quantiles
-        self.output_dim = output_dim
-        self.lstm = nn.LSTM(
-            input_dim, self.config.hidden_dim, self.config.num_layers,
-            batch_first=True, dropout=self.config.dropout
-        )
-        self.fc = nn.Linear(self.config.hidden_dim, self.output_dim)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.config.num_layers, x.size(0), 
-                        self.config.hidden_dim).to(self.config.device)
-        c0 = torch.zeros(self.config.num_layers, x.size(0), 
-                        self.config.hidden_dim).to(self.config.device)
-        
-        lstm_out, _ = self.lstm(x, (h0, c0))
-        predictions = self.fc(lstm_out[:, -1, :])
-        
-        return predictions.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
-
-class NLL_LSTM(BaseModel):
-    """LSTM using NLL Likelihood Loss Function, for Gaussian Likelihood, 
-       contains second FC layer for log variance"""
-    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
-        super().__init__(config)
-        self.lstm = nn.LSTM(
-            input_dim, self.config.hidden_dim, self.config.num_layers,
-            batch_first=True, dropout=self.config.dropout
-        )
-        self.fc_mean = nn.Linear(self.config.hidden_dim, output_dim) # Fully connected layer for mean prediction
-        self.fc_logvar = nn.Linear(self.config.hidden_dim, output_dim) # Fully connected layer for log variance prediction
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.config.num_layers, x.size(0),
-                        self.config.hidden_dim).to(self.config.device)
-        c0 = torch.zeros(self.config.num_layers, x.size(0),
-                        self.config.hidden_dim).to(self.config.device)
-        
-        lstm_out, _ = self.lstm(x, (h0, c0))
-        pred = self.fc_mean(lstm_out[:, -1, :]) # Mean prediction from model
-        logvar = self.fc_logvar(lstm_out[:, -1, :])
-        var = torch.exp(logvar) # Variance is exponent of logvar
-
-        return pred, var
-
-class MC_LSTM(BaseModel):
-    """LSTM using Monte Carlo Dropout for uncertainty estimation"""
-    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
-        super().__init__(config)
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.lstm = nn.LSTM(
-            self.input_dim, self.config.hidden_dim, self.config.num_layers,
-            batch_first=True, dropout=self.config.dropout
-        )
-        self.dropout = nn.Dropout(p=self.config.dropout)
-        self.fc = nn.Linear(self.config.hidden_dim, output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.config.num_layers, x.size(0),
-                        self.config.hidden_dim).to(self.config.device)
-        c0 = torch.zeros(self.config.num_layers, x.size(0),
-                        self.config.hidden_dim).to(self.config.device)
-        
-        lstm_out, _ = self.lstm(x, (h0, c0))
-        dropout_out = self.dropout(lstm_out[:, -1, :])
-        return self.fc(dropout_out)
-
 class ModelTrainer:
     """Handles model training and evaluation"""
     def __init__(self, model: BaseModel, config: TrainingConfig):
@@ -412,13 +311,13 @@ class Visualizer:
                 keys = train_pred_new.keys()
                 max_key = max(keys)
                 min_key = min(keys)
-                plt.fill_between(range(len(train_pred)), train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, label='Train Uncertainty')
-                plt.fill_between(range(offset, offset + len(test_pred)), test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', alpha=0.2, label='Test Uncertainty')
+                plt.fill_between(range(len(train_pred)), train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
+                plt.fill_between(range(offset, offset + len(test_pred)), test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
             
             if train_var is not None:
-                plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, label='Train Uncertainty')
+                plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
             if test_var is not None:
-                plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, label='Test Uncertainty')
+                plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
             
             plt.show()
    
@@ -510,7 +409,6 @@ class MC_Prediction:
         self.model.eval()
         self.model.apply(self.enable_dropout)
         predictions = torch.zeros((self.num_samples, data.size(0), self.model.output_dim))
-        print(predictions.shape)
         
         with torch.no_grad():
             for i in range(self.num_samples):
@@ -743,7 +641,6 @@ class ModelOptimisation:
         self.iters = iters
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
-        print(self.config_bounds['hidden_dim'])
         self.domain = [{'name': 'hidden_dim', 'type': 'discrete', 'domain': range(self.config_bounds['hidden_dim'][0], self.config_bounds['hidden_dim'][1])},
                 {'name': 'num_layers', 'type': 'discrete', 'domain': range(self.config_bounds['num_layers'][0], self.config_bounds['num_layers'][1])},
                 {'name': 'dropout', 'type': 'continuous', 'domain': (self.config_bounds['dropout'][0], self.config_bounds['dropout'][1])},
@@ -771,12 +668,12 @@ class ModelOptimisation:
          y_train, y_test) = data_processor.prepare_data(features, targets)
         
         
-
-        if isinstance(self.model_class, QuantileLSTM):
+        # Depending on which model, initialise the model parameters and loss function
+        if self.model_class == QuantileLSTM:
             self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1], quantiles = self.quantiles)
             criterion = QuantileLoss(self.quantiles)
-        elif isinstance(self.model_class, NLL_LSTM):
+        elif self.model_class == NLL_LSTM:
             criterion = nn.GaussianNLLLoss()
             self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1])
@@ -785,6 +682,7 @@ class ModelOptimisation:
             self.model = self.model_class(config = self.train_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1])
         
+        # Train the model
         self.trainer = self.trainer_class(self.model, self.train_config)
         self.model, _, average_loss = self.trainer.train(train_loader, test_loader, criterion)
         
@@ -820,34 +718,63 @@ class ModelOptimisation:
                 
         return best_params
 
+class ConformalQuantiles:
+    """Class for calculating conformal quantiles based off test set predictions"""
+    def __init__(self, y_test: np.ndarray, test_pred: Dict[float, np.ndarray], confidence: float):
+        self.y_test = y_test # (time_steps, features)
+        print(y_test.shape)
+        self.test_pred = test_pred # {quantile: (time_steps, features)}
+        self.confidence = confidence
+        keys = test_pred.keys()
+        self.upper_bound = test_pred[max(keys)]
+        self.lower_bound = test_pred[min(keys)]
+        
+    def calculate_intervals(self):
+        quantile_regression_calibration_intervals = np.zeros((self.y_test.shape[0], 2))
+        scores = np.zeros((self.y_test.shape[0], self.y_test.shape[1]))
+        print(scores.shape)
+        for i in range(self.y_test.shape[0]):
+            y_true = self.y_test[i, :]
+            lower_bound = self.lower_bound[i, :]
+            upper_bound = self.upper_bound[i, :]
+            scores[i, :] = np.maximum(y_true - lower_bound, upper_bound - y_true)
+            
+            in_interval = np.logical_and(y_true >= lower_bound, y_true <= upper_bound)
+            print(in_interval)
+            quantile_regression_calibration_intervals[i, :] = (np.percentile(lower_bound, 100 * (1 - self.confidence / 2)), np.percentile(upper_bound, 100 * (1 - self.confidence / 2)))
+        print(f"scores: {scores}")
+        return quantile_regression_calibration_intervals
 
     
+    def rank_residuals(self):
+        residuals = self.residuals()
+        rank_residuals = np.argsort(residuals, axis=0)
+        return rank_residuals
+    
 
-from CSTR_Sim import *
-from Bioprocess_Sim import *
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=10, T=500, tsim=101)
+    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
-        num_epochs=100,
-        learning_rate=0.01,
-        time_step=5,
-        num_layers=2,
-        hidden_dim=64,
-        dropout=0.2
+        num_epochs=164,
+        learning_rate=0.001,
+        time_step=7,
+        num_layers=1,
+        hidden_dim=106,
+        dropout=0.1
     )
-
+    np.random.seed(42)
     # Initialize components
 
-    # simulator = CSTRSimulator(CSTR_sim_config)
-    simulator = BioProcessSimulator(Biop_sim_config)
+    simulator = CSTRSimulator(CSTR_sim_config)
+    # simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
     simulation_results = simulator.run_multiple_simulations()
-    # converter = CSTRConverter()
-    converter = BioprocessConverter()
+    converter = CSTRConverter()
+    # converter = BioprocessConverter()
     features, targets = converter.convert(simulation_results)
     
     data_processor = DataProcessor(training_config)
@@ -861,16 +788,16 @@ def main():
     #     input_dim=X_train.shape[2],
     #     output_dim=y_train.shape[1],
     # )
-    quantiles = [0.1, 0.5, 0.9]
-    model = MC_LSTM(
+    quantiles = [0.25, 0.5, 0.75]
+    model = QuantileLSTM(
         config=training_config,
         input_dim=X_train.shape[2],
-        output_dim=y_train.shape[1]
+        output_dim=y_train.shape[1], quantiles=quantiles
     )
 
     # Train model
-    criterion = nn.MSELoss()
-    # criterion = QuantileLoss(quantiles)
+    # criterion = nn.MSELoss()
+    criterion = QuantileLoss(quantiles)
     # criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -884,14 +811,12 @@ def main():
         else:
             train_pred = model(X_train.to(training_config.device)).cpu().numpy()
             test_pred = model(X_test.to(training_config.device)).cpu().numpy()
-            print(train_pred.shape)
 
     # Inverse transform predictions
     scaler = data_processor.target_scaler
-    # inverse_transformer = QuantileTransform(quantiles, scaler)
-
-    # train_pred = inverse_transformer.inverse_transform(train_pred)
-    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    inverse_transformer = QuantileTransform(quantiles, scaler)
+    train_pred = inverse_transformer.inverse_transform(train_pred)
+    test_pred = inverse_transformer.inverse_transform(test_pred)
     # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
     # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
     # train_var = data_processor.target_scaler.inverse_transform(train_var)
@@ -899,31 +824,35 @@ def main():
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     
-    mc_predictor = MC_Prediction(model, training_config, num_samples=100)
-    train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
-    test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
+    # mc_predictor = MC_Prediction(model, training_config, num_samples=100)
+    # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
+    # test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
     
-    train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    test_pred = data_processor.target_scaler.inverse_transform(test_pred)
-    train_var = data_processor.target_scaler.inverse_transform(train_var)
-    test_var = data_processor.target_scaler.inverse_transform(test_var)
+    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
+    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    # train_var = data_processor.target_scaler.inverse_transform(train_var)
+    # test_var = data_processor.target_scaler.inverse_transform(test_var)
 
     # Visualize results
-    feature_names = ['c_x', 'c_n', 'c_q']
-    # visualizer = Visualizer()
-    # visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, Biop_sim_config.n_simulations, train_var, test_var)
-    model_class = MC_LSTM
-    trainer_class = ModelTrainer
-    optimizer = ModelOptimisation(model_class, Biop_sim_config, training_config, 
-                                  config_bounds={'hidden_dim': (32, 128), 'num_layers': (1, 3), 
-                                                 'dropout': (0.1, 0.5), 'learning_rate': (0.001, 0.1), 
-                                                 'batch_size': (5, 10), 'num_epochs': (50, 200), 
-                                                 'time_step': (5, 10)},
-                                  simulator=BioProcessSimulator, converter=BioprocessConverter, 
-                                  data_processor=DataProcessor, trainer_class=trainer_class, quantiles=None, monte_carlo=MC_Prediction)
+    # feature_names = ['c_x', 'c_n', 'c_q']
+    feature_names = ['temperature', 'concentration']
+    visualizer = Visualizer()
+    visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, Biop_sim_config.n_simulations)
+    # model_class = QuantileLSTM
+    # trainer_class = ModelTrainer
+    # optimizer = ModelOptimisation(model_class, Biop_sim_config, training_config, 
+    #                               config_bounds={'hidden_dim': (32, 128), 'num_layers': (1, 3), 
+    #                                              'dropout': (0.1, 0.5), 'learning_rate': (0.001, 0.1), 
+    #                                              'batch_size': (5, 10), 'num_epochs': (50, 200), 
+    #                                              'time_step': (5, 10)},
+    #                               simulator=BioProcessSimulator, converter=BioprocessConverter, 
+    #                               data_processor=DataProcessor, trainer_class=trainer_class, quantiles=quantiles, monte_carlo=None)
     
-    best_params = optimizer.optimise()
-    print(best_params)
+    # best_params = optimizer.optimise()
+    # print(best_params)
     
+    conformal = ConformalQuantiles(y_test_orig, test_pred, 0.95)
+    intervals = conformal.calculate_intervals()
+    print(intervals)
 if __name__ == "__main__":
     main()
