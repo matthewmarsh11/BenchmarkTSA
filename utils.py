@@ -177,6 +177,27 @@ class DataProcessor:
 
         return train_loader, test_loader, X_train, X_test, y_train, y_test
 
+class EarlyStopping:
+    def __init__(self, config: TrainingConfig):
+        self.config = config
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.early_stop = False
+        self.best_model_state = None
+    
+    def __call__(self, test_loss, model):
+        if test_loss < self.best_loss:
+            self.best_loss = test_loss
+            self.best_model_state = model.state_dict()
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.config.patience:
+                self.early_stop = True
+
+    def load_best_model(self, model):
+        model.load_state_dict(self.best_model_state)
+
 class ModelTrainer:
     """Handles model training and evaluation"""
     def __init__(self, model: BaseModel, config: TrainingConfig):
@@ -189,6 +210,7 @@ class ModelTrainer:
               criterion: nn.Module) -> Dict[str, List[float]]:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
+        early_stopping = EarlyStopping(self.config)
         history = {'train_loss': [], 'test_loss': []}
 
         for epoch in range(self.config.num_epochs):
@@ -217,6 +239,12 @@ class ModelTrainer:
                 avg_train_loss = train_loss / len(train_loader)
                 avg_test_loss = test_loss / len(test_loader)
                 avg_loss = (avg_train_loss + avg_test_loss) / 2
+                
+                early_stopping(avg_test_loss, self.model)
+                if early_stopping.early_stop:
+                    print("Early Stopping")
+                    break
+                early_stopping.load_best_model(self.model)
                 
         return self.model, history, avg_loss
 
@@ -1019,15 +1047,16 @@ class ConformalRegressor:
 def main():
     # Configurations
     CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
-    Biop_sim_config = SimulationConfig(n_simulations=100, T=20, tsim=240)
+    Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
-        num_epochs=200,
+        num_epochs=200000,
         learning_rate=0.001,
         time_step=10,
         weight_decay=0.01,
         factor=0.9,
         patience=10,
+        delta = 0.1,
     )
     LSTM_Config = LSTMConfig(
         hidden_dim=64,
