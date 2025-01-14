@@ -3,7 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Ignore my todo list and the model weights
+
 todo.md
+*.pth
 
 # C extensions
 *.so 
