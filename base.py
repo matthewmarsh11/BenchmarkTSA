@@ -10,6 +10,9 @@ class TrainingConfig:
     num_epochs: int
     learning_rate: float
     time_step: int
+    weight_decay: float
+    factor: float
+    patience: int
     train_test_split: float = 0.8
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 

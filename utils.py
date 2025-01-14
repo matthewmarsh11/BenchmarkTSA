@@ -187,7 +187,8 @@ class ModelTrainer:
 
     def train(self, train_loader: DataLoader, test_loader: DataLoader, 
               criterion: nn.Module) -> Dict[str, List[float]]:
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
         history = {'train_loss': [], 'test_loss': []}
 
         for epoch in range(self.config.num_epochs):
@@ -202,8 +203,10 @@ class ModelTrainer:
             self.model.eval()
             if isinstance(criterion, nn.GaussianNLLLoss):
                 test_loss = self._NLL_validate_epoch(test_loader, criterion)
+                scheduler.step(test_loss)
             else:
                 test_loss = self._validate_epoch(test_loader, criterion)
+                scheduler.step(test_loss)
             
             history['train_loss'].append(train_loss)
             history['test_loss'].append(test_loss)
@@ -1013,16 +1016,18 @@ class ConformalRegressor:
         
         return results
 
-
 def main():
     # Configurations
     CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
-    Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
+    Biop_sim_config = SimulationConfig(n_simulations=100, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
         num_epochs=200,
         learning_rate=0.001,
         time_step=10,
+        weight_decay=0.01,
+        factor=0.9,
+        patience=10,
     )
     LSTM_Config = LSTMConfig(
         hidden_dim=64,
