@@ -10,6 +10,7 @@ class TrainingConfig:
     num_epochs: int
     learning_rate: float
     time_step: int
+    horizon: int
     weight_decay: float
     factor: float
     patience: int
@@ -23,6 +24,8 @@ class LSTMConfig:
     num_layers: int
     hidden_dim: int
     dropout: float = 0.2
+    bidirectional: bool = False
+    use_batch_norm: bool = False
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass
@@ -32,6 +35,14 @@ class CNNConfig:
     kernel_sizes: int
     fc_dims: int
     dropout: float = 0.2
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+@dataclass
+class MLPConfig:
+    """Configuration for MLP model"""
+    hidden_dims: int
+    dropout: float = 0.2
+    activation: str = 'ReLU'
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 class BaseModel(nn.Module, ABC):

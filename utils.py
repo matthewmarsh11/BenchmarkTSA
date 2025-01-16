@@ -19,7 +19,6 @@ from base import TrainingConfig, BaseModel, CNNConfig, LSTMConfig
 from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
-from dataclasses import fields
 np.random.seed(42)
 
 @dataclass
@@ -143,9 +142,9 @@ class DataProcessor:
     def prepare_sequences(self, features: np.ndarray, targets: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Create sequences for time series prediction"""
         X, y = [], []
-        for i in range(len(features) - self.config.time_step):
+        for i in range(len(features) - self.config.time_step - self.config.horizon + 1):
             X.append(features[i:i + self.config.time_step])
-            y.append(targets[i + self.config.time_step])
+            y.append(targets[i + self.config.time_step + self.config.horizon - 1])
         return np.array(X), np.array(y)
 
     def prepare_data(self, features: np.ndarray, targets: np.ndarray) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -207,11 +206,11 @@ class ModelTrainer:
         self.model.to(self.device)
 
     def train(self, train_loader: DataLoader, test_loader: DataLoader, 
-              criterion: nn.Module) -> Dict[str, List[float]]:
+            criterion: nn.Module) -> Dict[str, List[float]]:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
         early_stopping = EarlyStopping(self.config)
-        history = {'train_loss': [], 'test_loss': []}
+        history = {'train_loss': [], 'test_loss': [], 'avg_loss': []}
 
         for epoch in range(self.config.num_epochs):
             # Training
@@ -225,22 +224,28 @@ class ModelTrainer:
             self.model.eval()
             if isinstance(criterion, nn.GaussianNLLLoss):
                 test_loss = self._NLL_validate_epoch(test_loader, criterion)
-                scheduler.step(test_loss)
             else:
                 test_loss = self._validate_epoch(test_loader, criterion)
-                scheduler.step(test_loss)
             
-            history['train_loss'].append(train_loss)
-            history['test_loss'].append(test_loss)
+            # Calculate average losses
+            avg_train_loss = train_loss / len(train_loader)
+            avg_test_loss = test_loss / len(test_loader)
+            avg_loss = (avg_train_loss + avg_test_loss) / 2
+            
+            # Update history
+            history['train_loss'].append(avg_train_loss)
+            history['test_loss'].append(avg_test_loss)
+            history['avg_loss'].append(avg_loss)
+            
+            # Use average loss for scheduler
+            scheduler.step(avg_loss)
             
             if (epoch + 1) % 10 == 0:
                 print(f'Epoch [{epoch+1}/{self.config.num_epochs}], '
-                      f'Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}')
-                avg_train_loss = train_loss / len(train_loader)
-                avg_test_loss = test_loss / len(test_loader)
-                avg_loss = (avg_train_loss + avg_test_loss) / 2
+                    f'Train Loss: {avg_train_loss:.4f}, Test Loss: {avg_test_loss:.4f}, '
+                    f'Avg Loss: {avg_loss:.4f}')
                 
-                early_stopping(avg_test_loss, self.model)
+                early_stopping(avg_loss, self.model)  # Use average loss for early stopping
                 if early_stopping.early_stop:
                     print("Early Stopping")
                     break
@@ -353,6 +358,35 @@ class Visualizer:
                 plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
             
             plt.show()
+    
+       
+    @staticmethod
+    def plot_conformal(train_pred: np.ndarray, test_pred: np.ndarray, y_train: np.ndarray, y_test: np.ndarray, 
+                       conformal_results: Dict, feature_names: list, num_simulations: int):
+        feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
+        
+        for i, sim in enumerate(feature_names):
+            plt.figure(figsize=(10, 6))
+            # Plot training predictions and ground truth
+            plt.plot(train_pred[:, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
+            plt.plot(y_train[:, i], label=f'{sim} Train Ground Truth', color='green', alpha=0.7)
+            
+            # Plot testing predictions and ground truth
+            offset = len(train_pred)
+            plt.plot(range(offset, offset + len(test_pred)), 
+                    test_pred[:, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
+            plt.plot(range(offset, offset + len(y_test)), 
+                    y_test[:, i], label=f'{sim} Test Ground Truth', color='orange', alpha=0.7)
+        
+            plt.title(f'{sim} Predictions')
+            plt.xlabel('Time Step')
+            plt.ylabel(sim)
+            plt.legend(loc='upper right', bbox_to_anchor=(1.05, 1), ncol=1)
+            plt.tight_layout()
+            # plt.fill_between(range(len(train_pred)), conformal_results['conformal_intervals']['conformal_upper'][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
+            plt.fill_between(range(offset, offset + len(test_pred)), conformal_results['conformal_intervals']['conformal_lower'][:, i], conformal_results['conformal_intervals']['conformal_upper'][:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
+        
+            plt.show()
             
     @staticmethod
     def plot_loss(history: Dict[float, np.ndarray]):
@@ -405,50 +439,75 @@ class Visualizer:
         plt.legend()
         plt.show()
 
+# class QuantileLoss(nn.Module):
+#     def __init__(self, quantiles):
+#         super(QuantileLoss, self).__init__()
+#         self.quantiles = quantiles
+
+#     def forward(self, preds, target):
+#         """
+#         Computes the quantile loss.
+
+#         Args:
+#             preds (torch.Tensor): Predicted quantiles of shape (batch_size, features * quantiles)
+#             target (torch.Tensor): Ground truth of shape (batch_size, features)
+
+#         Returns:
+#             torch.Tensor: The mean quantile loss.
+#         """
+#         # Reshape predictions to (batch_size, features, quantiles)
+#         num_features = target.size(1)
+#         preds = preds.view(-1, num_features, len(self.quantiles))
+
+#         assert not target.requires_grad
+#         assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
+#         assert preds.size(1) == target.size(1), "Feature dimension mismatch between preds and target"
+
+#         # Initialize list to store losses for each quantile
+#         losses = []
+
+#         # Compute loss for each quantile
+#         for i, q in enumerate(self.quantiles):
+#             # Select the predictions for the i-th quantile
+#             pred_q = preds[:, :, i]  # Shape: (batch_size, features)
+
+#             # Compute the error (difference) between target and predicted quantile
+#             errors = target - pred_q
+
+#             # Quantile loss formula
+#             loss_q = torch.max((q - 1) * errors, q * errors)
+
+#             # Add the loss for this quantile to the list
+#             losses.append(loss_q.mean())
+
+#         # Mean loss across all quantiles
+#         total_loss = torch.stack(losses).mean()
+#         return total_loss
+
 class QuantileLoss(nn.Module):
     def __init__(self, quantiles):
         super(QuantileLoss, self).__init__()
         self.quantiles = quantiles
-
+        
     def forward(self, preds, target):
-        """
-        Computes the quantile loss.
-
-        Args:
-            preds (torch.Tensor): Predicted quantiles of shape (batch_size, features * quantiles)
-            target (torch.Tensor): Ground truth of shape (batch_size, features)
-
-        Returns:
-            torch.Tensor: The mean quantile loss.
-        """
-        # Reshape predictions to (batch_size, features, quantiles)
         num_features = target.size(1)
         preds = preds.view(-1, num_features, len(self.quantiles))
-
-        assert not target.requires_grad
-        assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
-        assert preds.size(1) == target.size(1), "Feature dimension mismatch between preds and target"
-
-        # Initialize list to store losses for each quantile
-        losses = []
-
-        # Compute loss for each quantile
+        
+        # Expand target to match prediction shape
+        target = target.unsqueeze(-1).expand(-1, -1, len(self.quantiles))
+        
+        # Calculate errors for all quantiles at once
+        errors = target - preds
+        
+        # Calculate quantile loss for all quantiles simultaneously
+        q_losses = []
         for i, q in enumerate(self.quantiles):
-            # Select the predictions for the i-th quantile
-            pred_q = preds[:, :, i]  # Shape: (batch_size, features)
-
-            # Compute the error (difference) between target and predicted quantile
-            errors = target - pred_q
-
-            # Quantile loss formula
-            loss_q = torch.max((q - 1) * errors, q * errors)
-
-            # Add the loss for this quantile to the list
-            losses.append(loss_q.mean())
-
-        # Mean loss across all quantiles
-        total_loss = torch.stack(losses).mean()
-        return total_loss
+            q_loss = torch.max((q - 1) * errors[..., i], q * errors[..., i])
+            q_losses.append(q_loss)
+            
+        # Stack and mean across all dimensions
+        loss = torch.stack(q_losses, dim=-1)
+        return loss.mean()
 
 class EnhancedQuantileLoss(nn.Module):
     def __init__(self, quantiles, smoothness_lambda=0.1):
@@ -776,7 +835,7 @@ class ModelOptimisation:
             if isinstance(bounds, tuple):  # Single parameter bounds
 
                 param_type = ('continuous' if name == 'learning_rate' or name == 'dropout' or
-                              name == 'weight_decay' or name == 'factor' or name == 'delta' 
+                              name == 'weight_decay' or name == 'factor' or name == 'delta'
                               else 'discrete'
                 )
                 if param_type == 'discrete':
@@ -804,7 +863,6 @@ class ModelOptimisation:
     def objective_function (self, x):
         # Get the parameters in terms of x
         current_idx = 0
-        print(self.config_bounds)
         # Process each parameter according to its type
         for name, bounds in self.config_bounds.items():
             if isinstance(bounds, tuple):  # Single parameter
@@ -822,7 +880,10 @@ class ModelOptimisation:
                     setattr(config_obj, name, int(value))
                 else:
                     setattr(config_obj, name, float(value))
-                    
+                # Map 0 to False and 1 to True for bidirectional LSTM
+                if name == 'bidirectional' or 'use_batch_norm' in name:
+                    setattr(self.model_config, name, bool(value))
+                
             elif isinstance(bounds, list):  # List parameter (for CNN)
                 num_values = len(bounds)
                 values = [x[:, current_idx + i] for i in range(num_values)]
@@ -845,7 +906,7 @@ class ModelOptimisation:
             self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1], quantiles = self.quantiles)
             # criterion = QuantileLoss(self.quantiles)
-            criterion = EnhancedQuantileLoss(self.quantiles)
+            criterion = QuantileLoss(self.quantiles)
         elif self.model_class == NLL_LSTM:
             criterion = nn.GaussianNLLLoss()
             self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
@@ -981,6 +1042,7 @@ class ConformalQuantile:
         for q, pred in quantile_preds.items():
             residual = y_true - pred
             score = np.maximum(q * residual, (q - 1) * residual)
+            
             scores.append(score)
         return np.mean(scores, axis=0)
 
@@ -999,6 +1061,7 @@ class ConformalQuantile:
                 y_pred = self.base_model(X_calib)
                 quantile_preds = self.inverse_transformer.inverse_transform(y_pred)
                 scores = self._compute_quantile_scores(y_calib, quantile_preds)
+                print(scores)
             else:
                 y_pred = self.base_model(X_calib).cpu().numpy()
                 
@@ -1037,13 +1100,26 @@ class ConformalQuantile:
             y_pred = self.base_model(X)
             quantile_preds = self.inverse_transformer.inverse_transform(y_pred)
             
-        # Compute conformally calibrated intervals
-        q = np.quantile(self.calibration_scores, 1 - self.alpha)
+        # Get number of columns/features
+        num_features = self.calibration_scores.shape[1]
+        
+        # Compute conformally calibrated intervals for each feature
+        qs = np.array([np.quantile(self.calibration_scores[:, i], 1 - self.alpha) 
+                  for i in range(num_features)])
+        
+        # Initialize arrays for lower and upper bounds
+        conformal_lower = np.zeros_like(quantile_preds[min(self.base_model.quantiles)])
+        conformal_upper = np.zeros_like(quantile_preds[max(self.base_model.quantiles)])
+        
+        # Apply feature-specific conformal scores
+        for i in range(num_features):
+            conformal_lower[:, i] = quantile_preds[min(self.base_model.quantiles)][:, i] - qs[i]
+            conformal_upper[:, i] = quantile_preds[max(self.base_model.quantiles)][:, i] + qs[i]
         
         results = {
             'quantiles': quantile_preds,
-            'conformal_lower': quantile_preds[min(self.base_model.quantiles)] - q,
-            'conformal_upper': quantile_preds[max(self.base_model.quantiles)] + q
+            'conformal_lower': conformal_lower,
+            'conformal_upper': conformal_upper
         }
         
         return results
@@ -1067,15 +1143,39 @@ class ConformalQuantile:
         in_interval = np.logical_and(y_true >= lower_bound, y_true <= upper_bound)
         coverage = np.mean(in_interval)
         
-        # Find equivalent quantiles by binary search
+        def interpolate_quantile(q: float) -> np.ndarray:
+            """
+            Interpolate between available quantiles for a given q value.
+            """
+            # Get available quantiles and sort them
+            quant_keys = sorted(list(conformal_interval['quantiles'].keys()))
+            
+            # Find the two closest quantiles
+            idx = np.searchsorted(quant_keys, q)
+            if idx == 0:
+                return conformal_interval['quantiles'][quant_keys[0]]
+            elif idx == len(quant_keys):
+                return conformal_interval['quantiles'][quant_keys[-1]]
+            
+            # Interpolate between the two closest quantiles
+            q1, q2 = quant_keys[idx-1], quant_keys[idx]
+            v1 = conformal_interval['quantiles'][q1]
+            v2 = conformal_interval['quantiles'][q2]
+            
+            # Linear interpolation
+            weight = (q - q1) / (q2 - q1)
+            return v1 + weight * (v2 - v1)
+        
         def binary_search(target_coverage: float, is_upper: bool) -> float:
             left, right = 0.0, 1.0
             for _ in range(50):  # Maximum iterations for binary search
                 mid = (left + right) / 2
+                predicted_quantile = interpolate_quantile(mid)
+                
                 if is_upper:
-                    current_coverage = np.mean(y_true <= conformal_interval['quantiles'][mid])
+                    current_coverage = np.mean(y_true <= predicted_quantile)
                 else:
-                    current_coverage = np.mean(y_true >= conformal_interval['quantiles'][mid])
+                    current_coverage = np.mean(y_true >= predicted_quantile)
                 
                 if abs(current_coverage - target_coverage) < 1e-3:
                     return mid
@@ -1083,7 +1183,7 @@ class ConformalQuantile:
                     right = mid
                 else:
                     left = mid
-                    
+            
             return mid
         
         # Target coverage for each tail is (1 - coverage)/2
@@ -1122,13 +1222,14 @@ class ConformalQuantile:
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
+    CSTR_sim_config = SimulationConfig(n_simulations=100, T=101, tsim=500)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
         num_epochs=200,
         learning_rate=0.001,
         time_step=10,
+        horizon=5,
         weight_decay=0.01,
         factor=0.9,
         patience=10,
@@ -1138,6 +1239,8 @@ def main():
         hidden_dim=64,
         num_layers=2,
         dropout=0.2,
+        bidirectional=False,
+        use_batch_norm=False,
     )
     CNN_Config = CNNConfig(
         conv_channels = [16, 32],
@@ -1168,7 +1271,7 @@ def main():
     #     input_dim=X_train.shape[2],
     #     output_dim=y_train.shape[1],
     # )
-    quantiles = [0.01, 0.5, 0.99]
+    quantiles = [0.25, 0.5, 0.75]
     model = QuantileLSTM(
         config=LSTM_Config,
         input_dim=X_train.shape[2],
@@ -1177,8 +1280,8 @@ def main():
 
     # Train model
     # criterion = nn.MSELoss()
-    # criterion = QuantileLoss(quantiles)
-    criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
+    criterion = QuantileLoss(quantiles)
+    # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
     # criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -1216,10 +1319,10 @@ def main():
     # Visualize results
     # feature_names = ['c_x', 'c_n', 'c_q']
     feature_names = ['conc', 'temp']
-    visualizer = Visualizer()
-    visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
-    visualizer.plot_loss(history)
-    visualizer.plot_loss_loss(history)
+    # visualizer = Visualizer()
+    # visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
+    # visualizer.plot_loss(history)
+    # visualizer.plot_loss_loss(history)
     model_class = QuantileLSTM
     trainer_class = ModelTrainer
     
@@ -1229,6 +1332,7 @@ def main():
         'num_epochs': (50, 500),
         'learning_rate': (0.0001, 0.1),
         'time_step': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'horizon': (1, 10),
         'weight_decay': (1e-6, 0.1),
         'factor': (0.1, 0.99),
         'patience': (5, 100),
@@ -1247,6 +1351,7 @@ def main():
         'num_epochs': (50, 500),
         'learning_rate': (0.0001, 0.1),
         'time_step': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'horizon': (1, 10),
         'weight_decay': (1e-6, 0.1),
         'factor': (0.1, 0.99),
         'patience': (5, 100),
@@ -1256,12 +1361,13 @@ def main():
         'hidden_dim': (32, 128),
         'num_layers': (1, 3),
         'dropout': (0.1, 0.9),
+        'bidirectional': (0, 1)
     }
     
     
     optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
                                   config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 2, quantiles=quantiles, monte_carlo=None)
+                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
     
     best_params, best_loss = optimizer.optimise()
     print(best_params)
@@ -1305,17 +1411,18 @@ def main():
     # optimised_test_var = data_processor.target_scaler.inverse_transform(optimised_test_var)
 
     # Visualize results
+    visualizer = Visualizer()
     visualizer.plot_predictions(optimised_train_pred, optimised_test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
     visualizer.plot_loss(history)
     
-    print('best loss', best_loss)
-    conformal = ConformalQuantile(model, inverse_transformer, alpha=0.1)
+    # print('best loss', best_loss)
+    conformal = ConformalQuantile(model, inverse_transformer, alpha=0.25)
     conformal.fit_calibrate(X_test, y_test_orig, method='absolute')
     results = conformal.predict(X_test, y_test_orig, method='absolute')
-    print(results)
+    print(results['equivalent_quantiles'])
     conformal_test = conformal.predict_quantile(X_test)
     # Plot the training data with the uncertainty from quantiles, and then the conformal intervals on the test data
-    visualizer.plot_predictions(optimised_test_pred, conformal_test, y_test_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
+    # visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
     
 if __name__ == "__main__":
     main()
