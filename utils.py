@@ -343,7 +343,7 @@ class Visualizer:
             plt.xlabel('Time Step')
             plt.ylabel(sim)
             plt.legend(loc='upper right', bbox_to_anchor=(1.05, 1), ncol=1)
-            plt.tight_layout()
+            
             if train_pred_new:
                 keys = train_pred_new.keys()
                 max_key = max(keys)
@@ -355,7 +355,7 @@ class Visualizer:
                 plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
             if test_var is not None:
                 plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
-            
+            plt.tight_layout()
             plt.show()
     
        
@@ -381,10 +381,10 @@ class Visualizer:
             plt.xlabel('Time Step')
             plt.ylabel(sim)
             plt.legend(loc='upper right', bbox_to_anchor=(1.05, 1), ncol=1)
-            plt.tight_layout()
+            
             # plt.fill_between(range(len(train_pred)), conformal_results['conformal_intervals']['conformal_upper'][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
             plt.fill_between(range(offset, offset + len(test_pred)), conformal_results['conformal_intervals']['conformal_lower'][:, i], conformal_results['conformal_intervals']['conformal_upper'][:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
-        
+            plt.tight_layout()
             plt.show()
             
     @staticmethod
