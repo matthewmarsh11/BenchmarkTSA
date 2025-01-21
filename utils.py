@@ -933,7 +933,6 @@ class ConformalQuantile:
                 y_pred = self.base_model(X_calib)
                 quantile_preds = self.inverse_transformer.inverse_transform(y_pred)
                 scores = self._compute_quantile_scores(y_calib, quantile_preds)
-                print(scores)
             else:
                 y_pred = self.base_model(X_calib).cpu().numpy()
                 
@@ -1094,7 +1093,7 @@ class ConformalQuantile:
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=10, T=1010, tsim=5000)
+    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
         batch_size=5,
@@ -1292,7 +1291,6 @@ def main():
     conformal = ConformalQuantile(model, inverse_transformer, alpha=0.25)
     conformal.fit_calibrate(X_test, y_test_orig, method='absolute')
     results = conformal.predict(X_test, y_test_orig, method='absolute')
-    print(results['equivalent_quantiles'])
     conformal_test = conformal.predict_quantile(X_test)
     # Plot the training data with the uncertainty from quantiles, and then the conformal intervals on the test data
     # visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
