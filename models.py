@@ -331,6 +331,119 @@ class StandardCNN(BaseModel):
             fc_input_dim = fc_dim
             
         self.fc_layers.append(nn.Linear(fc_input_dim, output_dim))
+        
+
+    def forward(self, x):
+        # Input shape: [batch_size, time_step, features]
+        # CNN expects: [batch_size, features, time_step]
+        x = x.transpose(1, 2)
+        
+        # Apply CNN layers
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+        
+        # Global average pooling
+        x = self.global_pool(x)
+        x = x.squeeze(-1)
+        
+        # Fully connected layers
+        for fc_layer in self.fc_layers:
+            x = fc_layer(x)
+        
+        return x
+    
+class NLL_CNN(BaseModel):
+    """ CNN with NLL Likelihood Loss Function, outputs mean and log variance predictions """
+    def __init__(self, config: CNNConfig, input_dim: int, output_dim: int):
+        super().__init__(config)
+        
+        # Build CNN layers dynamically
+        self.conv_layers = nn.ModuleList()
+        self.output_dim = output_dim
+        in_channels = input_dim
+        
+        for out_channels, kernel_size in zip(self.config.conv_channels, self.config.kernel_sizes):
+            self.conv_layers.append(nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size//2),
+                nn.ReLU(),
+                nn.BatchNorm1d(out_channels)
+            ))
+            in_channels = out_channels
+            
+        # Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Build shared FC layers dynamically
+        self.shared_fc_layers = nn.ModuleList()
+        fc_input_dim = self.config.conv_channels[-1]
+        
+        for i, fc_dim in enumerate(self.config.fc_dims):
+            self.shared_fc_layers.append(nn.Linear(fc_input_dim, fc_dim))
+            self.shared_fc_layers.append(nn.ReLU())
+            self.shared_fc_layers.append(nn.Dropout(self.config.dropout))
+            fc_input_dim = fc_dim
+            
+        # Separate output layers for mean and log variance
+        self.fc_mean = nn.Linear(fc_input_dim, output_dim)
+        self.fc_logvar = nn.Linear(fc_input_dim, output_dim)
+
+    def forward(self, x):
+        # Input shape: [batch_size, time_step, features]
+        # CNN expects: [batch_size, features, time_step]
+        x = x.transpose(1, 2)
+        
+        # Apply CNN layers
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+        
+        # Global average pooling
+        x = self.global_pool(x)
+        x = x.squeeze(-1)
+        
+        # Apply shared FC layers
+        for fc_layer in self.shared_fc_layers:
+            x = fc_layer(x)
+        
+        # Generate mean and log variance predictions
+        mean = self.fc_mean(x)
+        logvar = self.fc_logvar(x)
+        var = torch.exp(logvar)
+        
+        return mean, var
+
+class MC_CNN(BaseModel):
+    """ Standard CNN Implementation with Monte Carlo Dropout """
+    def __init__(self, config: CNNConfig, input_dim: int, output_dim: int):
+        super().__init__(config)
+        
+        # Build CNN layers dynamically
+        self.conv_layers = nn.ModuleList()
+        self.output_dim = output_dim
+        in_channels = input_dim
+        
+        for out_channels, kernel_size in zip(self.config.conv_channels, self.config.kernel_sizes):
+            self.conv_layers.append(nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size//2),
+                nn.ReLU(),
+                nn.BatchNorm1d(out_channels),
+                nn.Dropout(self.config.dropout)  # Add dropout layer
+            ))
+            in_channels = out_channels
+            
+        # Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Build FC layers dynamically
+        self.fc_layers = nn.ModuleList()
+        fc_input_dim = self.config.conv_channels[-1]
+        
+        for i, fc_dim in enumerate(self.config.fc_dims):
+            self.fc_layers.append(nn.Linear(fc_input_dim, fc_dim))
+            self.fc_layers.append(nn.ReLU())
+            self.fc_layers.append(nn.Dropout(self.config.dropout))  # Add dropout layer
+            fc_input_dim = fc_dim
+            
+        self.fc_layers.append(nn.Linear(fc_input_dim, output_dim))
 
     def forward(self, x):
         # Input shape: [batch_size, time_step, features]
