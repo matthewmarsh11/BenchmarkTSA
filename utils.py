@@ -1023,11 +1023,11 @@ def main():
         delta = 0.042,
     )
     LSTM_Config = LSTMConfig(
-        hidden_dim=263,
-        num_layers=13,
-        dropout=0.2,
-        bidirectional=True,
-        use_batch_norm=True,
+        hidden_dim = 64,
+        num_layers=2,
+        dropout = 0.2,
+        bidirectional=False,
+        norm_type = None,
     )
     CNN_Config = CNNConfig(
         conv_channels = [16, 32],
@@ -1059,17 +1059,18 @@ def main():
     #     output_dim=y_train.shape[1],
     # )
     quantiles = [0.25, 0.5, 0.75]
-    model = RSQuantileLSTM(
+    model = LSTM(
         config=LSTM_Config,
         input_dim=X_train.shape[2],
-        output_dim=y_train.shape[1], quantiles = quantiles
+        output_dim=y_train.shape[1],
+        var = True
     )
 
     # Train model
     # criterion = nn.MSELoss()
-    criterion = QuantileLoss(quantiles)
+    # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    # criterion = nn.GaussianNLLLoss()
+    criterion = nn.GaussianNLLLoss()
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
     # Make predictions

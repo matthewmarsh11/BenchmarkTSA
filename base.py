@@ -25,8 +25,7 @@ class LSTMConfig:
     hidden_dim: int
     dropout: float = 0.2
     bidirectional: bool = False
-    use_batch_norm: bool = False
-    # norm_type: str = 'batch'
+    norm_type: str = 'batch'
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass
