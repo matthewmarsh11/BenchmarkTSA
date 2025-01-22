@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Any, Union
@@ -20,6 +19,7 @@ from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
 np.random.seed(42)
+from fvcore.nn import FlopCountAnalysis
 
 @dataclass
 class ConformityScore:
@@ -438,134 +438,49 @@ class Visualizer:
         plt.legend()
         plt.show()
 
-# class QuantileLoss(nn.Module):
-#     def __init__(self, quantiles):
-#         super(QuantileLoss, self).__init__()
-#         self.quantiles = quantiles
-
-#     def forward(self, preds, target):
-#         """
-#         Computes the quantile loss.
-
-#         Args:
-#             preds (torch.Tensor): Predicted quantiles of shape (batch_size, features * quantiles)
-#             target (torch.Tensor): Ground truth of shape (batch_size, features)
-
-#         Returns:
-#             torch.Tensor: The mean quantile loss.
-#         """
-#         # Reshape predictions to (batch_size, features, quantiles)
-#         num_features = target.size(1)
-#         preds = preds.view(-1, num_features, len(self.quantiles))
-
-#         assert not target.requires_grad
-#         assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
-#         assert preds.size(1) == target.size(1), "Feature dimension mismatch between preds and target"
-
-#         # Initialize list to store losses for each quantile
-#         losses = []
-
-#         # Compute loss for each quantile
-#         for i, q in enumerate(self.quantiles):
-#             # Select the predictions for the i-th quantile
-#             pred_q = preds[:, :, i]  # Shape: (batch_size, features)
-
-#             # Compute the error (difference) between target and predicted quantile
-#             errors = target - pred_q
-
-#             # Quantile loss formula
-#             loss_q = torch.max((q - 1) * errors, q * errors)
-
-#             # Add the loss for this quantile to the list
-#             losses.append(loss_q.mean())
-
-#         # Mean loss across all quantiles
-#         total_loss = torch.stack(losses).mean()
-#         return total_loss
-
-# class QuantileLoss(nn.Module):
-#     def __init__(self, quantiles):
-#         super(QuantileLoss, self).__init__()
-#         self.quantiles = quantiles
-        
-#     def forward(self, preds, target):
-#         num_features = target.size(1)
-#         preds = preds.view(-1, num_features, len(self.quantiles))
-        
-#         # Expand target to match prediction shape
-#         target = target.unsqueeze(-1).expand(-1, -1, len(self.quantiles))
-        
-#         # Calculate errors for all quantiles at once
-#         errors = target - preds
-        
-#         # Calculate quantile loss for all quantiles simultaneously
-#         q_losses = []
-#         for i, q in enumerate(self.quantiles):
-#             q_loss = torch.max((q - 1) * errors[..., i], q * errors[..., i])
-#             q_losses.append(q_loss)
-            
-#         # Stack and mean across all dimensions
-#         loss = torch.stack(q_losses, dim=-1)
-#         return loss.mean()
-
 class QuantileLoss(nn.Module):
-    def __init__(self, quantiles, monotonicity_weight=1.0):
+    def __init__(self, quantiles):
         super(QuantileLoss, self).__init__()
         self.quantiles = quantiles
-        self.monotonicity_weight = monotonicity_weight
-        
-    def forward(self, preds, target):
-        num_features = target.size(1)
-        preds = preds.view(-1, num_features, len(self.quantiles))
-        target = target.unsqueeze(-1).expand(-1, -1, len(self.quantiles))
-        
-        # Basic quantile loss
-        errors = target - preds
-        q_losses = []
-        for i, q in enumerate(self.quantiles):
-            q_loss = torch.max((q - 1) * errors[..., i], q * errors[..., i])
-            q_losses.append(q_loss)
-        
-        # Monotonicity penalty
-        monotonicity_loss = torch.tensor(0.0).to(preds.device)
-        for i in range(len(self.quantiles)-1):
-            crossing_diff = preds[..., i] - preds[..., i+1]
-            monotonicity_loss += torch.mean(torch.relu(crossing_diff))
-            
-        loss = torch.stack(q_losses, dim=-1).mean()
-        return loss + self.monotonicity_weight * monotonicity_loss
-
-class EnhancedQuantileLoss(nn.Module):
-    def __init__(self, quantiles, smoothness_lambda=0.1):
-        super(EnhancedQuantileLoss, self).__init__()
-        self.quantiles = quantiles
-        self.smoothness_lambda = smoothness_lambda
 
     def forward(self, preds, target):
-        # Original shape handling
+        """
+        Computes the quantile loss.
+
+        Args:
+            preds (torch.Tensor): Predicted quantiles of shape (batch_size, features * quantiles)
+            target (torch.Tensor): Ground truth of shape (batch_size, features)
+
+        Returns:
+            torch.Tensor: The mean quantile loss.
+        """
+        # Reshape predictions to (batch_size, features, quantiles)
         num_features = target.size(1)
         preds = preds.view(-1, num_features, len(self.quantiles))
-        
-        # Basic quantile loss
+
+        assert not target.requires_grad
+        assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
+        assert preds.size(1) == target.size(1), "Feature dimension mismatch between preds and target"
+
+        # Initialize list to store losses for each quantile
         losses = []
+
+        # Compute loss for each quantile
         for i, q in enumerate(self.quantiles):
-            pred_q = preds[:, :, i]
+            # Select the predictions for the i-th quantile
+            pred_q = preds[:, :, i]  # Shape: (batch_size, features)
+
+            # Compute the error (difference) between target and predicted quantile
             errors = target - pred_q
+
+            # Quantile loss formula
             loss_q = torch.max((q - 1) * errors, q * errors)
+
+            # Add the loss for this quantile to the list
             losses.append(loss_q.mean())
-            
-            # Add temporal smoothness penalty
-            if pred_q.size(1) > 1:  # If we have more than one timestep
-                smoothness_penalty = torch.mean(torch.abs(pred_q[:, 1:] - pred_q[:, :-1]))
-                losses[-1] += self.smoothness_lambda * smoothness_penalty
-        
-        # Add crossing penalty to maintain quantile order
-        crossing_penalty = 0
-        for i in range(len(self.quantiles)-1):
-            crossing_diff = preds[:, :, i] - preds[:, :, i+1]
-            crossing_penalty += torch.mean(torch.relu(crossing_diff))
-        
-        total_loss = torch.stack(losses).mean() + crossing_penalty
+
+        # Mean loss across all quantiles
+        total_loss = torch.stack(losses).mean()
         return total_loss
 
 class QuantileTransform:
@@ -1091,27 +1006,28 @@ class ConformalQuantile:
             return {'conformal_intervals': conformal_intervals,
                     'equivalent_quantiles': (lower_q, upper_q)}
 
+
 def main():
     # Configurations
     CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     training_config = TrainingConfig(
-        batch_size=5,
-        num_epochs=200,
-        learning_rate=0.001,
-        time_step=10,
-        horizon=5,
+        batch_size=48,
+        num_epochs=300,
+        learning_rate=0.0031,
+        time_step=36,
+        horizon=7,
         weight_decay=0.01,
-        factor=0.9,
-        patience=10,
-        delta = 0.1,
+        factor=0.1,
+        patience=58,
+        delta = 0.042,
     )
     LSTM_Config = LSTMConfig(
-        hidden_dim=64,
-        num_layers=2,
+        hidden_dim=263,
+        num_layers=13,
         dropout=0.2,
-        bidirectional=False,
-        use_batch_norm=False,
+        bidirectional=True,
+        use_batch_norm=True,
     )
     CNN_Config = CNNConfig(
         conv_channels = [16, 32],
@@ -1237,35 +1153,35 @@ def main():
     }
     
     
-    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-                                  config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
+    # optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
+    #                               config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+    #                               data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
     
-    best_params, best_loss = optimizer.optimise()
-    print(best_params)
+    # best_params, best_loss = optimizer.optimise()
+    # print(best_params)
     
-    checkpoint = torch.load('best_model.pth')
-    print(checkpoint.keys())
-    model = model_class(checkpoint['model_config'], 
-                input_dim=X_train.shape[2],
-                output_dim=y_train.shape[1],
-                quantiles = quantiles)
+    # checkpoint = torch.load('best_model.pth')
+    # print(checkpoint.keys())
+    # model = model_class(checkpoint['model_config'], 
+    #             input_dim=X_train.shape[2],
+    #             output_dim=y_train.shape[1],
+    #             quantiles = quantiles)
     
-    model.load_state_dict(checkpoint['model_state_dict'])    
-    model.eval()
-    with torch.no_grad():
-        if isinstance(criterion, nn.GaussianNLLLoss):
-            optimised_train_pred, optimised_train_var = model(X_train.to(training_config.device))
-            optimised_test_pred, optimised_test_var = model(X_test.to(training_config.device))
-        else:
-            optimised_train_pred = model(X_train.to(training_config.device)).cpu().numpy()
-            optimised_test_pred = model(X_test.to(training_config.device)).cpu().numpy()
+    # model.load_state_dict(checkpoint['model_state_dict'])    
+    # model.eval()
+    # with torch.no_grad():
+    #     if isinstance(criterion, nn.GaussianNLLLoss):
+    #         optimised_train_pred, optimised_train_var = model(X_train.to(training_config.device))
+    #         optimised_test_pred, optimised_test_var = model(X_test.to(training_config.device))
+    #     else:
+    #         optimised_train_pred = model(X_train.to(training_config.device)).cpu().numpy()
+    #         optimised_test_pred = model(X_test.to(training_config.device)).cpu().numpy()
 
-    # Inverse transform predictions
-    scaler = data_processor.target_scaler
-    inverse_transformer = QuantileTransform(quantiles, scaler)
-    optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
-    optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
+    # # Inverse transform predictions
+    # scaler = data_processor.target_scaler
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
+    # optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
+    # optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
     # optimised_train_pred = data_processor.target_scaler.inverse_transform(optimised_train_pred)
     # optimised_test_pred = data_processor.target_scaler.inverse_transform(optimised_test_pred)
     # optimised_train_var = data_processor.target_scaler.inverse_transform(optimised_train_var)
@@ -1283,9 +1199,9 @@ def main():
     # optimised_test_var = data_processor.target_scaler.inverse_transform(optimised_test_var)
 
     # Visualize results
-    visualizer = Visualizer()
-    visualizer.plot_predictions(optimised_train_pred, optimised_test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
-    visualizer.plot_loss(history)
+    # visualizer = Visualizer()
+    # visualizer.plot_predictions(optimised_train_pred, optimised_test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
+    # visualizer.plot_loss(history)
     
     # print('best loss', best_loss)
     conformal = ConformalQuantile(model, inverse_transformer, alpha=0.25)
@@ -1295,5 +1211,9 @@ def main():
     # Plot the training data with the uncertainty from quantiles, and then the conformal intervals on the test data
     # visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
     
+    flops = FlopCountAnalysis(model, X_train)
+    print(flops)
+    print(flops.total())
+    print(flops.by_module())
 if __name__ == "__main__":
     main()

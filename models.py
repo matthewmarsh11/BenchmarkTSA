@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+# LSTMs
 
 class StandardLSTM(BaseModel):
     """Standard LSTM implementation"""
@@ -299,6 +300,8 @@ class BayesianLSTM(nn.Module):
     def predict(self, X):
         return self(torch.tensor(X, dtype=torch.float32)).view(-1).detach().numpy()
 
+# Convolutional Neural Networks (CNNs)
+
 class StandardCNN(BaseModel):
     """ Standard CNN Implementation """
     def __init__(self, config: CNNConfig, input_dim: int, output_dim: int):
@@ -515,6 +518,8 @@ class QuantileCNN(BaseModel):
         
         return x.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
 
+# Multi-Layer Perceptrons (ANNs)
+
 activations = ["ReLU", "Softplus", "Tanh", "SELU", "LeakyReLU", "Sigmoid", "Softmax", "LogSoftmax"]
 
 class MLP(BaseModel):
@@ -600,6 +605,7 @@ class QuantileMLP(BaseModel):
         out = self.layers(x)
         return out.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
 
+# Linear Regression
 
 class MLR(BaseModel):
     """Multi Linear Regression Model"""
@@ -609,4 +615,22 @@ class MLR(BaseModel):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
+    
+# Transformers
+
+class TimeSeriesTransformer(BaseModel):
+    """Time Series Transformer Model"""
+    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int):
+        super().__init__(config)
+        self.config = config
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.transformer = nn.TransformerEncoder
+        
+        
+        
+# Graph Neural Networks (GNNs)
+
+class ST_GCN(BaseModel):
+    """Spatial-Temporal Graph Convolutional Network"""
     
