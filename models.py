@@ -126,8 +126,6 @@ class LSTM(BaseModel):
         if self.first_do is not None:
             lstm_out = self.first_do(lstm_out)
         
-
-            
         # Apply the other layers
         for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
             h0 = torch.zeros(self.config.num_layers-1, x.size(0), 
@@ -143,7 +141,6 @@ class LSTM(BaseModel):
                 lstm_out = ln_layer(lstm_out)
             if self.monte_carlo:
                 lstm_out = do_layer(lstm_out)
-        
         
         # For the basic LSTM just return the final prediction
         x = self.fc(lstm_out[:, -1, :])
@@ -161,8 +158,6 @@ class LSTM(BaseModel):
         if self.quantiles is not None:
             # Output the quantiles
             return x.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
-        
-
         
         return x
 

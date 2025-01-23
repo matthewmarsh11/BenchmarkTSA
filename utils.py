@@ -591,10 +591,10 @@ class ModelOptimisation:
     """Class for optimising parameters and hyperparameters of the model"""
     def __init__(self, model_class: BaseModel, sim_config: SimulationConfig, 
                 train_config: TrainingConfig, model_config: Union[CNNConfig, LSTMConfig],
-                config_bounds: Dict[str, Union[Tuple[float, float], List[Tuple[float, float]]]], # Modified to handle lists of bounds
+                config_bounds: Dict[str, Union[Tuple[float, float], List[Tuple[float, float]]]], 
                 simulator, converter: SimulationConverter, data_processor: DataProcessor,
                 trainer_class: ModelTrainer, iters: int = 100, quantiles: Optional[List[float]] = None, 
-                monte_carlo = None):
+                monte_carlo: Optional[bool] = None, variance: Optional[bool] = None):
         
         self.model_class = model_class
         self.sim_config = sim_config
@@ -608,6 +608,7 @@ class ModelOptimisation:
         self.iters = iters
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
+        self.variance = variance
         self.domain = self._create_domain()
 
 
@@ -665,11 +666,11 @@ class ModelOptimisation:
                 else:
                     setattr(config_obj, name, float(value))
                 # Map 0 to False and 1 to True for bidirectional LSTM
-                if name == 'bidirectional' or name == 'use_batch_norm':
+                if name == 'bidirectional':
                     setattr(config_obj, name, bool(int(value)))
-                # if name == 'norm_type':
-                #     norm_mapping = {0: None, 1: 'batch', 2: 'layer'}
-                #     setattr(self.model_config, name, norm_mapping[int(value)])
+                if name == 'norm_type':
+                    norm_types = {0: None, 1: 'layer', 2: 'batch'}
+                    setattr(config_obj, name, norm_types[int(value)])
                 
             elif isinstance(bounds, list):  # List parameter (for CNN)
                 num_values = len(bounds)
@@ -687,35 +688,37 @@ class ModelOptimisation:
         (train_loader, test_loader, X_train, X_test,
          y_train, y_test) = data_processor.prepare_data(features, targets)
         
-        
-        # Depending on which model, initialise the model parameters and loss function
-        if self.model_class == QuantileLSTM or self.model_class == QuantileCNN or self.model_class == RSQuantileLSTM:
+        if self.quantiles is not None:
             self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
                                     output_dim = y_train.shape[1], quantiles = self.quantiles)
-            # criterion = QuantileLoss(self.quantiles)
             criterion = QuantileLoss(self.quantiles)
-        elif self.model_class == NLL_LSTM:
-            criterion = nn.GaussianNLLLoss()
-            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
-                                    output_dim = y_train.shape[1])
-        else:
+        
+        elif self.monte_carlo:
+            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2],
+                                    output_dim = y_train.shape[1], monte_carlo = self.monte_carlo)
             criterion = nn.MSELoss()
-            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
-                                    output_dim = y_train.shape[1])
+        
+        else:
+            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2],
+                                    output_dim = y_train.shape[1], var = True)
+            criterion = nn.GaussianNLLLoss()
+        
         
         # Train the model
         self.trainer = self.trainer_class(self.model, self.train_config)
         self.model, _, average_loss = self.trainer.train(train_loader, test_loader, criterion)
-        
+        if np.isnan(average_loss):
+            average_loss = float('inf')
+            
         if self.monte_carlo is not None:
             mc_predictor = self.monte_carlo(self.model, self.train_config, num_samples=100)
             _, train_var = mc_predictor.predict(X_train.to(self.train_config.device))
             average_loss = average_loss + np.concatenate(train_var).sum()
         
-        return average_loss  
+        return average_loss
     
     
-    def optimise(self):
+    def optimise(self, path: str = None):
         # Define the bounds for the hyperparameters
         optimizer = BayesianOptimization(
             f = self.objective_function,
@@ -742,7 +745,7 @@ class ModelOptimisation:
                         'model_config': self.model_config,
                         'training_config': self.train_config,
                     }
-                    torch.save(checkpoint, 'best_model.pth')
+                    torch.save(checkpoint, path)
                 
         return best_params, best_loss
     
@@ -1085,13 +1088,13 @@ def main():
 
     # Inverse transform predictions
     scaler = data_processor.target_scaler
-    inverse_transformer = QuantileTransform(quantiles, scaler)
-    train_pred = inverse_transformer.inverse_transform(train_pred)
-    test_pred = inverse_transformer.inverse_transform(test_pred)
-    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
-    # train_var = data_processor.target_scaler.inverse_transform(train_var)
-    # test_var = data_processor.target_scaler.inverse_transform(test_var)
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
+    # train_pred = inverse_transformer.inverse_transform(train_pred)
+    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    train_pred = data_processor.target_scaler.inverse_transform(train_pred)
+    test_pred = data_processor.target_scaler.inverse_transform(test_pred)
+    train_var = data_processor.target_scaler.inverse_transform(train_var)
+    test_var = data_processor.target_scaler.inverse_transform(test_var)
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     
@@ -1111,7 +1114,7 @@ def main():
     visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
     visualizer.plot_loss(history)
     visualizer.plot_loss_loss(history)
-    model_class = RSQuantileLSTM
+    model_class = LSTM
     trainer_class = ModelTrainer
     
     CNN_config_bounds = {
@@ -1150,33 +1153,32 @@ def main():
         'num_layers': (1, 50),
         'dropout': (0.1, 0.9),
         'bidirectional': (0, 1),
-        'use_batch_norm': (0, 1),
+        'norm_type': (0, 2),
     }
     
     
-    # optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-    #                               config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-    #                               data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
+    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
+                                  config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
     
-    # best_params, best_loss = optimizer.optimise()
-    # print(best_params)
+    best_params, best_loss = optimizer.optimise()
     
-    # checkpoint = torch.load('best_model.pth')
-    # print(checkpoint.keys())
-    # model = model_class(checkpoint['model_config'], 
-    #             input_dim=X_train.shape[2],
-    #             output_dim=y_train.shape[1],
-    #             quantiles = quantiles)
+    checkpoint = torch.load('best_model.pth')
+    print(checkpoint.keys())
+    model = model_class(checkpoint['model_config'], 
+                input_dim=X_train.shape[2],
+                output_dim=y_train.shape[1],
+                quantiles = quantiles)
     
-    # model.load_state_dict(checkpoint['model_state_dict'])    
-    # model.eval()
-    # with torch.no_grad():
-    #     if isinstance(criterion, nn.GaussianNLLLoss):
-    #         optimised_train_pred, optimised_train_var = model(X_train.to(training_config.device))
-    #         optimised_test_pred, optimised_test_var = model(X_test.to(training_config.device))
-    #     else:
-    #         optimised_train_pred = model(X_train.to(training_config.device)).cpu().numpy()
-    #         optimised_test_pred = model(X_test.to(training_config.device)).cpu().numpy()
+    model.load_state_dict(checkpoint['model_state_dict'])    
+    model.eval()
+    with torch.no_grad():
+        if isinstance(criterion, nn.GaussianNLLLoss):
+            optimised_train_pred, optimised_train_var = model(X_train.to(training_config.device))
+            optimised_test_pred, optimised_test_var = model(X_test.to(training_config.device))
+        else:
+            optimised_train_pred = model(X_train.to(training_config.device)).cpu().numpy()
+            optimised_test_pred = model(X_test.to(training_config.device)).cpu().numpy()
 
     # # Inverse transform predictions
     # scaler = data_processor.target_scaler
@@ -1205,10 +1207,10 @@ def main():
     # visualizer.plot_loss(history)
     
     # print('best loss', best_loss)
-    conformal = ConformalQuantile(model, inverse_transformer, alpha=0.25)
-    conformal.fit_calibrate(X_test, y_test_orig, method='absolute')
-    results = conformal.predict(X_test, y_test_orig, method='absolute')
-    conformal_test = conformal.predict_quantile(X_test)
+    # conformal = ConformalQuantile(model, inverse_transformer, alpha=0.25)
+    # conformal.fit_calibrate(X_test, y_test_orig, method='absolute')
+    # results = conformal.predict(X_test, y_test_orig, method='absolute')
+    # conformal_test = conformal.predict_quantile(X_test)
     # Plot the training data with the uncertainty from quantiles, and then the conformal intervals on the test data
     # visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
     
