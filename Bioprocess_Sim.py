@@ -105,7 +105,7 @@ class BioProcessSimulator:
         
         obs, _ = self.env.reset()
         done = False
-        num_actions = np.random.randint(0, 10)
+        num_actions = np.random.randint(0, self.config.T // 2)
         
         # Initialize with random action
         initial_action = np.random.uniform(

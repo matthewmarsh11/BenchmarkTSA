@@ -63,7 +63,7 @@ class CSTRSimulator():
 
     def generate_setpoints(self) -> Dict[str, List[float]]:
         """Generate random setpoints for the simulation."""
-        num_changes = np.random.randint(0, 50)
+        num_changes = np.random.randint(0, self.config.T // 2)
         change_points = np.sort(np.random.choice(range(1, self.config.tsim), num_changes, replace=False))
         setpoints = []
         current_setpoint = np.random.rand()
@@ -82,7 +82,7 @@ class CSTRSimulator():
         nominal_conc = 0.75
         
         # Temperature disturbances
-        num_changes_temp = np.random.randint(0, 50)
+        num_changes_temp = np.random.randint(0, self.config.T // 2)
         change_points_temp = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_temp, replace=False))
         disturbances_temp = []
         current_disturbance_temp = nominal_temp + (np.random.rand() - 0.5) * 10
@@ -94,7 +94,7 @@ class CSTRSimulator():
             disturbances_temp.append(current_disturbance_temp)
         
         # Concentration disturbances
-        num_changes_conc = np.random.randint(0, 4)
+        num_changes_conc = np.random.randint(0, self.config.T // 2)
         change_points_conc = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_conc, replace=False))
         disturbances_conc = []
         current_disturbance_conc = nominal_conc + (np.random.rand() - 0.5) * 0.1
@@ -149,7 +149,7 @@ class CSTRSimulator():
         done = False
         actions = []
         
-        num_actions = np.random.randint(0, 50)
+        num_actions = np.random.randint(0, self.config.T // 2)
         initial_action = np.random.uniform(self.action_space['low'], self.action_space['high'])
         initial_action = self._normalize_action(initial_action)
         

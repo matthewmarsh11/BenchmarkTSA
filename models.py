@@ -130,6 +130,7 @@ class LSTM(BaseModel):
         for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
             h0 = torch.zeros(self.config.num_layers-1, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
+            print("h0", h0.shape)
             c0 = torch.zeros(self.config.num_layers-1, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
             
