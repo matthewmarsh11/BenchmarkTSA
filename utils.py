@@ -311,7 +311,7 @@ class Visualizer:
     def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
                          test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
                          y_train: np.ndarray, y_test: np.ndarray,
-                         feature_names: list, num_simulations: int, train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
+                         feature_names: list, num_simulations: int, num_plots: Optional[int] = None, train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
         """
         Plots predictions and ground truth data.
         
@@ -331,7 +331,7 @@ class Visualizer:
             test_pred_new = test_pred
             train_pred = train_pred[0.5]
             test_pred = test_pred[0.5]
-            
+        
         for i, sim in enumerate(feature_names):
             plt.figure(figsize=(10, 6))
             # Plot training predictions and ground truth
@@ -531,9 +531,8 @@ class QuantileTransform:
         return quantile_preds
 
 class MC_Prediction:
-    def __init__(self, model, config, num_samples):
+    def __init__(self, model, num_samples):
         self.model = model
-        self.config = config
         self.num_samples = num_samples
 
     def enable_dropout(self, m):
@@ -612,7 +611,7 @@ class ModelOptimisation:
                 config_bounds: Dict[str, Union[Tuple[float, float], List[Tuple[float, float]]]], 
                 simulator, converter: SimulationConverter, data_processor: DataProcessor,
                 trainer_class: ModelTrainer, iters: int = 100, quantiles: Optional[List[float]] = None, 
-                monte_carlo: Optional[bool] = None, variance: Optional[bool] = None):
+                monte_carlo: Optional[classmethod] = None, variance: Optional[bool] = None):
         
         self.model_class = model_class
         self.sim_config = sim_config
@@ -663,6 +662,45 @@ class ModelOptimisation:
         
         return domain
 
+    def initialize_model_and_criterion(self, X_train, y_train):
+        """
+        Initialize model and criterion with support for multiple uncertainty estimation methods:
+        - Quantile regression
+        - Monte Carlo dropout
+        - Variance estimation
+        
+        Returns:
+            tuple: (model, criterion, use_monte_carlo)
+        """
+        model_kwargs = {
+            'config': self.model_config,
+            'input_dim': X_train.shape[2],
+            'output_dim': y_train.shape[1]
+        }
+        
+        # Start with base configuration
+        use_monte_carlo = False
+        
+        # Add uncertainty estimation features based on flags
+        if self.variance:
+            model_kwargs['var'] = True
+            criterion = nn.GaussianNLLLoss()
+        elif self.quantiles is not None:
+            model_kwargs['quantiles'] = self.quantiles
+            criterion = QuantileLoss(self.quantiles)
+        else:
+            criterion = nn.MSELoss()
+        
+        # Monte Carlo can be combined with other methods
+        if self.monte_carlo:
+            model_kwargs['monte_carlo'] = True
+            use_monte_carlo = True
+        
+        # Initialize model with collected parameters
+        self.model = self.model_class(**model_kwargs)
+        
+        return self.model, criterion, use_monte_carlo
+
     def objective_function (self, x):
         # Get the parameters in terms of x
         current_idx = 0
@@ -706,30 +744,18 @@ class ModelOptimisation:
         (train_loader, test_loader, X_train, X_test,
          y_train, y_test) = data_processor.prepare_data(features, targets)
         
-        if self.quantiles is not None:
-            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2], 
-                                    output_dim = y_train.shape[1], quantiles = self.quantiles)
-            criterion = QuantileLoss(self.quantiles)
-        
-        elif self.monte_carlo:
-            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2],
-                                    output_dim = y_train.shape[1], monte_carlo = self.monte_carlo)
-            criterion = nn.MSELoss()
-        
-        else:
-            self.model = self.model_class(config = self.model_config, input_dim = X_train.shape[2],
-                                    output_dim = y_train.shape[1], var = True)
-            criterion = nn.GaussianNLLLoss()
-        
+        self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion(X_train, y_train)
         
         # Train the model
         self.trainer = self.trainer_class(self.model, self.train_config)
         self.model, _, average_loss = self.trainer.train(train_loader, test_loader, criterion)
+        
         if np.isnan(average_loss):
             average_loss = float('inf')
-            
-        if self.monte_carlo is not None:
-            mc_predictor = self.monte_carlo(self.model, self.train_config, num_samples=100)
+        
+        # Apply Monte Carlo prediction if enabled
+        if use_monte_carlo:
+            mc_predictor = self.monte_carlo(self.model, num_samples=100)
             _, train_var = mc_predictor.predict(X_train.to(self.train_config.device))
             average_loss = average_loss + np.concatenate(train_var).sum()
         
@@ -1061,14 +1087,15 @@ def main():
         config=LSTM_Config,
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[1],
-        quantiles = quantiles
+        monte_carlo = True
     )
 
     # Train model
-    # criterion = nn.MSELoss()
-    criterion = QuantileLoss(quantiles)
+    criterion = nn.MSELoss()
+    # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
     # criterion = nn.GaussianNLLLoss()
+    
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
     # Make predictions
@@ -1083,19 +1110,24 @@ def main():
 
     # Inverse transform predictions
     scaler = data_processor.target_scaler
-    inverse_transformer = QuantileTransform(quantiles, scaler)
-    train_pred = inverse_transformer.inverse_transform(train_pred)
-    test_pred = inverse_transformer.inverse_transform(test_pred)
+    
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
+    # train_pred = inverse_transformer.inverse_transform(train_pred)
+    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    
+    
     # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
     # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
     # train_var = data_processor.target_scaler.inverse_transform(train_var)
     # test_var = data_processor.target_scaler.inverse_transform(test_var)
+    
+    
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     
-    # mc_predictor = MC_Prediction(model, training_config, num_samples=100)
-    # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
-    # test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
+    mc_predictor = MC_Prediction(model, num_samples=100)
+    train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
+    test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
     
     # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
     # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
@@ -1107,13 +1139,13 @@ def main():
     feature_names = ['conc', 'temp']
     action_names = ['inlet temp', 'feed conc', 'coolant temp']
     visualizer = Visualizer()
-    visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations)
-    visualizer.plot_loss(history)
-    visualizer.plot_loss_loss(history)
-    print(features.shape) # 100, 60 (time steps, features)
+    # visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations, num_plots = 5)
+    # visualizer.plot_loss(history)
+    # visualizer.plot_loss_loss(history)
+    # print(features.shape) # 100, 60 (time steps, features)
     actions = features[:, -int(features.shape[1] - targets.shape[1]):]
-    print(actions.shape)
-    visualizer.plot_actions(actions, action_names, num_simulations = 10)
+    # print(actions.shape)
+    # visualizer.plot_actions(actions, action_names, num_simulations = 10)
     model_class = LSTM
     trainer_class = ModelTrainer
     
@@ -1157,11 +1189,11 @@ def main():
     }
     
     
-    # optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-    #                               config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-    #                               data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, quantiles=quantiles, monte_carlo=None)
+    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
+                                  config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, monte_carlo=MC_Prediction)
     
-    # best_params, best_loss = optimizer.optimise()
+    best_params, best_loss = optimizer.optimise()
     
     # checkpoint = torch.load('best_model.pth')
     # print(checkpoint.keys())
@@ -1182,13 +1214,18 @@ def main():
 
     # # Inverse transform predictions
     # scaler = data_processor.target_scaler
+    
     inverse_transformer = QuantileTransform(quantiles, scaler)
-    # optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
-    # optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
+    optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
+    optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
+    
+    
     # optimised_train_pred = data_processor.target_scaler.inverse_transform(optimised_train_pred)
     # optimised_test_pred = data_processor.target_scaler.inverse_transform(optimised_test_pred)
     # optimised_train_var = data_processor.target_scaler.inverse_transform(optimised_train_var)
     # optimised_test_var = data_processor.target_scaler.inverse_transform(optimised_test_var)
+    
+    
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     

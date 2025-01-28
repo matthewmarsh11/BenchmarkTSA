@@ -75,7 +75,7 @@ class LSTM(BaseModel):
                 dropout=self.config.dropout,
                 bidirectional=self.config.bidirectional
             )
-            self.lstm_layers.append(lstm)
+            # self.lstm_layers.append(lstm)
             
             if monte_carlo:
                 do = nn.Dropout(p=self.config.dropout)
@@ -125,12 +125,11 @@ class LSTM(BaseModel):
             lstm_out = self.first_ln(lstm_out)
         if self.first_do is not None:
             lstm_out = self.first_do(lstm_out)
-        
+            
         # Apply the other layers
         for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
             h0 = torch.zeros(self.config.num_layers-1, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
-            print("h0", h0.shape)
             c0 = torch.zeros(self.config.num_layers-1, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
             
@@ -149,11 +148,14 @@ class LSTM(BaseModel):
         if self.monte_carlo: # Dropout from the output
         # Pass the output 
             x = nn.Dropout(p=self.config.dropout)(lstm_out[:, -1, :])
+            return self.fc(x)
+            
         
         if self.var:
             # Pass the log variance through the exponential function to get the variance
             # from the fully connected layer
             var = torch.exp(self.fc_logvar(lstm_out[:, -1, :]))
+            x = self.fc(lstm_out[:, -1, :])
             return x, var
         
         if self.quantiles is not None:
