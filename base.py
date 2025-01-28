@@ -40,7 +40,8 @@ class CNNConfig:
 @dataclass
 class MLPConfig:
     """Configuration for MLP model"""
-    hidden_dims: int
+    hidden_dim: int
+    num_layers: int
     dropout: float = 0.2
     activation: str = 'ReLU'
     device: str = "cuda" if torch.cuda.is_available() else "cpu"

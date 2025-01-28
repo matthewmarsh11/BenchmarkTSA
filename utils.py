@@ -4,7 +4,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Tuple, Optional, Any, Union, NamedTuple
 from dataclasses import dataclass
 import pandas as pd
 from scipy import stats
@@ -138,6 +138,11 @@ class BioprocessConverter(SimulationConverter):
 
         return features, targets
 
+class ScalingResult(NamedTuple):
+    """Container for scaled mean and variance results"""
+    mean: np.ndarray
+    variance: np.ndarray
+
 class DataProcessor:
     """Handles data processing and preparation"""
     def __init__(self, config: TrainingConfig):
@@ -180,6 +185,56 @@ class DataProcessor:
         test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
 
         return train_loader, test_loader, X_train, X_test, y_train, y_test
+
+    def rescale_predictions(self, scaled_mean: np.ndarray, scaled_variance: np.ndarray) -> ScalingResult:
+        """
+        Rescale the mean and variance predictions from the network back to the original scale.
+        
+        Parameters:
+        -----------
+        scaled_mean: array-like
+            The mean predictions from the network (scaled between 0 and 1)
+        scaled_variance: array-like
+            The variance predictions from the network
+            
+        Returns:
+        --------
+        ScalingResult
+            Named tuple containing rescaled mean and variance
+        """
+        # Get the scale factors from the target scaler
+        scale_factor = self.target_scaler.data_max_ - self.target_scaler.data_min_
+        
+        # Rescale the mean predictions
+        rescaled_mean = self.target_scaler.inverse_transform(scaled_mean)
+    
+        rescaled_variance = np.multiply(scaled_variance, (scale_factor ** 2))
+        
+        return ScalingResult(rescaled_mean, rescaled_variance)
+
+    def process_model_output(self, mean_pred, var_pred) -> ScalingResult:
+        """
+        Process the model's output (mean and variance predictions) by rescaling them.
+        
+        Parameters:
+        -----------
+        model_output: Tuple[torch.Tensor, torch.Tensor]
+            The mean and variance predictions from the model
+            
+        Returns:
+        --------
+        ScalingResult
+            Named tuple containing rescaled mean and variance
+        """
+        
+        # Convert to numpy for scaling
+        if isinstance(mean_pred, torch.Tensor):
+            mean_pred = mean_pred.detach().numpy()
+        if isinstance(var_pred, torch.Tensor):
+            var_pred = var_pred.detach().numpy()
+        
+        return self.rescale_predictions(mean_pred, var_pred)
+    
 
 class EarlyStopping:
     def __init__(self, config: TrainingConfig):
@@ -311,7 +366,8 @@ class Visualizer:
     def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
                          test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
                          y_train: np.ndarray, y_test: np.ndarray,
-                         feature_names: list, num_simulations: int, num_plots: Optional[int] = None, train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
+                         feature_names: list, num_simulations: int, num_plots: Optional[int] = None, 
+                         train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
         """
         Plots predictions and ground truth data.
         
@@ -1087,14 +1143,14 @@ def main():
         config=LSTM_Config,
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[1],
-        monte_carlo = True
+        var = True
     )
 
     # Train model
-    criterion = nn.MSELoss()
+    # criterion = nn.MSELoss()
     # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    # criterion = nn.GaussianNLLLoss()
+    criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -1116,18 +1172,22 @@ def main():
     # test_pred = inverse_transformer.inverse_transform(test_pred)
     
     
-    # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
-    # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
-    # train_var = data_processor.target_scaler.inverse_transform(train_var)
-    # test_var = data_processor.target_scaler.inverse_transform(test_var)
+    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
+    train_mean = rescaled_train_pred.mean
+    train_var = rescaled_train_pred.variance
+    
+    rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
+    test_mean = rescaled_test_pred.mean
+    test_var = rescaled_test_pred.variance
+
     
     
     y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
     y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     
-    mc_predictor = MC_Prediction(model, num_samples=100)
-    train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
-    test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
+    # mc_predictor = MC_Prediction(model, num_samples=100)
+    # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
+    # test_pred, test_var = mc_predictor.predict(X_test.to(training_config.device))
     
     # train_pred = data_processor.target_scaler.inverse_transform(train_pred)
     # test_pred = data_processor.target_scaler.inverse_transform(test_pred)
@@ -1139,7 +1199,9 @@ def main():
     feature_names = ['conc', 'temp']
     action_names = ['inlet temp', 'feed conc', 'coolant temp']
     visualizer = Visualizer()
-    # visualizer.plot_predictions(train_pred, test_pred, y_train_orig, y_test_orig, feature_names, CSTR_sim_config.n_simulations, num_plots = 5)
+    visualizer.plot_predictions(train_mean, test_mean, y_train_orig, y_test_orig, 
+                                feature_names, CSTR_sim_config.n_simulations, 
+                                num_plots = 5, train_var=train_var, test_var=test_var)
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
@@ -1189,11 +1251,11 @@ def main():
     }
     
     
-    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-                                  config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, monte_carlo=MC_Prediction)
+    # optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
+    #                               config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+    #                               data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, monte_carlo=MC_Prediction)
     
-    best_params, best_loss = optimizer.optimise()
+    # best_params, best_loss = optimizer.optimise()
     
     # checkpoint = torch.load('best_model.pth')
     # print(checkpoint.keys())
@@ -1215,9 +1277,9 @@ def main():
     # # Inverse transform predictions
     # scaler = data_processor.target_scaler
     
-    inverse_transformer = QuantileTransform(quantiles, scaler)
-    optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
-    optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
+    # optimised_train_pred = inverse_transformer.inverse_transform(optimised_train_pred)
+    # optimised_test_pred = inverse_transformer.inverse_transform(optimised_test_pred)
     
     
     # optimised_train_pred = data_processor.target_scaler.inverse_transform(optimised_train_pred)
@@ -1226,8 +1288,8 @@ def main():
     # optimised_test_var = data_processor.target_scaler.inverse_transform(optimised_test_var)
     
     
-    y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
-    y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
+    # y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
+    # y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
     
     # mc_predictor = MC_Prediction(model, training_config, num_samples=100)
     # optimised_train_pred, optimised_train_var = mc_predictor.predict(X_train.to(training_config.device))
@@ -1244,10 +1306,10 @@ def main():
     # visualizer.plot_loss(history)
     
     # print('best loss', best_loss)
-    conformal = ConformalQuantile(model, scaler, X_test, y_test, alpha=0.25)
-    results = conformal.predict()
+    # conformal = ConformalQuantile(model, scaler, X_test, y_test, alpha=0.25)
+    # results = conformal.predict()
     # Plot the training data with the uncertainty from quantiles, and then the conformal intervals on the test data
-    visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
+    # visualizer.plot_conformal(train_pred[0.5], test_pred[0.5], y_train_orig, y_test_orig, results, feature_names, CSTR_sim_config.n_simulations)
     
     flops = FlopCountAnalysis(model, X_train)
     print(flops)

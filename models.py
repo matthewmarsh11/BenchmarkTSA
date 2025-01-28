@@ -457,6 +457,109 @@ class BayesianLSTM(nn.Module):
 
 # Convolutional Neural Networks (CNNs)
 
+class CNN(BaseModel):
+    """Unified CNN implementation supporting multiple uncertainty estimation methods"""
+    def __init__(self, config: CNNConfig, input_dim: int, output_dim: int, 
+                 quantiles: Optional[List[float]] = None, 
+                 monte_carlo: Optional[bool] = False, 
+                 var: Optional[bool] = False):
+        """Initialize CNN model with various uncertainty estimation capabilities
+        
+        Args:
+            config: CNNConfig object containing model parameters
+            input_dim: Input dimension
+            output_dim: Output dimension
+            quantiles: List of quantiles for quantile regression
+            monte_carlo: Whether to use Monte Carlo dropout
+            var: Whether to estimate variance (for NLL loss)
+        """
+        super().__init__(config)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
+        
+        # Adjust output dimension for quantile regression
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+        
+        # Build CNN layers
+        self.conv_layers = nn.ModuleList()
+        in_channels = input_dim
+        
+        for out_channels, kernel_size in zip(self.config.conv_channels, self.config.kernel_sizes):
+            conv_block = [
+                nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size//2),
+                nn.ReLU()
+            ]
+            
+            # Add normalization if specified
+            if getattr(self.config, 'norm_type', None):
+                if getattr(self.config.norm_type, 'batch', False):
+                    conv_block.append(nn.BatchNorm1d(out_channels))
+                if getattr(self.config.norm_type, 'layer', False):
+                    conv_block.append(nn.LayerNorm([out_channels, -1]))
+            
+            # Add dropout for Monte Carlo
+            if monte_carlo:
+                conv_block.append(nn.Dropout(self.config.dropout))
+                
+            self.conv_layers.append(nn.Sequential(*conv_block))
+            in_channels = out_channels
+            
+        # Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Build FC layers
+        self.fc_layers = nn.ModuleList()
+        fc_input_dim = self.config.conv_channels[-1]
+        
+        for fc_dim in self.config.fc_dims:
+            fc_block = [
+                nn.Linear(fc_input_dim, fc_dim),
+                nn.ReLU()
+            ]
+            
+            if monte_carlo:
+                fc_block.append(nn.Dropout(self.config.dropout))
+                
+            self.fc_layers.append(nn.Sequential(*fc_block))
+            fc_input_dim = fc_dim
+        
+        # Output layers
+        self.fc = nn.Linear(fc_input_dim, self.output_dim)
+        if self.var:
+            self.fc_logvar = nn.Linear(fc_input_dim, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Reshape input for CNN: [batch_size, features, time_step]
+        x = x.transpose(1, 2)
+        
+        # Apply CNN layers
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+        
+        # Global average pooling
+        x = self.global_pool(x)
+        x = x.squeeze(-1)
+        
+        # Apply FC layers
+        for fc_layer in self.fc_layers:
+            x = fc_layer(x)
+        
+        if self.var:
+            # Return mean and variance for NLL loss
+            var = torch.exp(self.fc_logvar(x))
+            return self.fc(x), var
+            
+        if self.quantiles is not None:
+            # Return reshaped output for quantile regression
+            return self.fc(x).view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            
+        # Standard or Monte Carlo dropout output
+        return self.fc(x)
+
 class StandardCNN(BaseModel):
     """ Standard CNN Implementation """
     def __init__(self, config: CNNConfig, input_dim: int, output_dim: int):
@@ -678,45 +781,125 @@ class QuantileCNN(BaseModel):
 activations = ["ReLU", "Softplus", "Tanh", "SELU", "LeakyReLU", "Sigmoid", "Softmax", "LogSoftmax"]
 
 class MLP(BaseModel):
-    
-    """Multi-Layer Perceptron
+    """Unified MLP implementation supporting multiple uncertainty estimation methods"""
+    def __init__(self, config: MLPConfig, input_dim: int, output_dim: int,
+                 quantiles: Optional[List[float]] = None,
+                 monte_carlo: Optional[bool] = False,
+                 var: Optional[bool] = False):
+        """Initialize MLP model with various uncertainty estimation capabilities
         
-        config: MLPConfig, configuration for MLP model
-        input_dim: int, input dimension
-        output_dim: int, output dimension
-           
-    """
-    def __init__(
-        self, config: MLPConfig, input_dim: int, output_dim: int):
+        Args:
+            config: MLPConfig object containing model parameters
+            input_dim: Input dimension
+            output_dim: Output dimension
+            quantiles: List of quantiles for quantile regression
+            monte_carlo: Whether to use Monte Carlo dropout
+            var: Whether to estimate variance (for NLL loss)
+        """
         super().__init__(config)
-        self.config = config
         self.input_dim = input_dim
-        self.hidden_dim = self.config.hidden_dim
-        self.output_dim = self.output_dim
-        assert self.config.activation in activations, "Activation function not supported"
-        self.config.activation = getattr(nn, self.config.activation)()
-        # Input Layers 
-        layers = [
-            nn.Linear(input_dim, self.config.hidden_dim),
-            self.activation,
-            nn.Dropout(self.config.dropout)
-        ]
-        # Hidden Layers
-        for _ in range(self.config.num_layers-2):
-            layers += [
-                nn.Linear(self.config.hidden_dim, self.config.hidden_dim),
-                self.activation,
-                nn.Dropout(self.config.dropout)
-            ]
-        # Output Layer
-        layers += [
-            nn.Linear(self.config.hidden_dim, self.output_dim)
-        ]
+        self.output_dim = output_dim
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
         
+        # Adjust output dimension for quantile regression
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+            
+        # Validate activation function
+        assert config.activation in activations, "Activation function not supported"
+        self.activation = getattr(nn, config.activation)()
+        
+        # Build layers
+        layers = []
+        current_dim = input_dim
+        
+        # Input layer
+        layers.extend([
+            nn.Linear(current_dim, config.hidden_dim),
+            self.activation
+        ])
+        
+        if monte_carlo:
+            layers.append(nn.Dropout(config.dropout))
+            
+        current_dim = config.hidden_dim
+        
+        # Hidden layers
+        for _ in range(config.num_layers - 2):
+            layers.extend([
+                nn.Linear(current_dim, config.hidden_dim),
+                self.activation
+            ])
+            
+            if monte_carlo:
+                layers.append(nn.Dropout(config.dropout))
+                
+            current_dim = config.hidden_dim
+            
         self.layers = nn.Sequential(*layers)
         
-    def forward(self, x):
-        return self.layers(x)
+        # Output layers
+        self.fc = nn.Linear(current_dim, self.output_dim)
+        if self.var:
+            self.fc_logvar = nn.Linear(current_dim, output_dim)
+            
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.layers(x)
+        
+        if self.var:
+            # Return mean and variance for NLL loss
+            var = torch.exp(self.fc_logvar(x))
+            return self.fc(x), var
+            
+        if self.quantiles is not None:
+            # Return reshaped output for quantile regression
+            return self.fc(x).view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            
+        # Standard or Monte Carlo dropout output
+        return self.fc(x)
+
+# class MLP(BaseModel):
+    
+#     """Multi-Layer Perceptron
+        
+#         config: MLPConfig, configuration for MLP model
+#         input_dim: int, input dimension
+#         output_dim: int, output dimension
+           
+#     """
+#     def __init__(
+#         self, config: MLPConfig, input_dim: int, output_dim: int):
+#         super().__init__(config)
+#         self.config = config
+#         self.input_dim = input_dim
+#         self.hidden_dim = self.config.hidden_dim
+#         self.output_dim = self.output_dim
+#         assert self.config.activation in activations, "Activation function not supported"
+#         self.config.activation = getattr(nn, self.config.activation)()
+#         # Input Layers 
+#         layers = [
+#             nn.Linear(input_dim, self.config.hidden_dim),
+#             self.activation,
+#             nn.Dropout(self.config.dropout)
+#         ]
+#         # Hidden Layers
+#         for _ in range(self.config.num_layers-2):
+#             layers += [
+#                 nn.Linear(self.config.hidden_dim, self.config.hidden_dim),
+#                 self.activation,
+#                 nn.Dropout(self.config.dropout)
+#             ]
+#         # Output Layer
+#         layers += [
+#             nn.Linear(self.config.hidden_dim, self.output_dim)
+#         ]
+        
+#         self.layers = nn.Sequential(*layers)
+        
+#     def forward(self, x):
+#         return self.layers(x)
 
 class QuantileMLP(BaseModel):
     """Quantile Multi-Layer Perceptron
