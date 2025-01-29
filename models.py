@@ -813,7 +813,7 @@ class MLP(BaseModel):
         
         # Build layers
         layers = []
-        current_dim = input_dim
+        current_dim = self.input_dim
         
         # Input layer
         layers.extend([
@@ -841,7 +841,7 @@ class MLP(BaseModel):
         self.layers = nn.Sequential(*layers)
         
         # Output layers
-        self.fc = nn.Linear(current_dim, self.output_dim)
+        self.fc = nn.Linear(current_dim, output_dim)
         if self.var:
             self.fc_logvar = nn.Linear(current_dim, output_dim)
             
@@ -860,46 +860,6 @@ class MLP(BaseModel):
         # Standard or Monte Carlo dropout output
         return self.fc(x)
 
-# class MLP(BaseModel):
-    
-#     """Multi-Layer Perceptron
-        
-#         config: MLPConfig, configuration for MLP model
-#         input_dim: int, input dimension
-#         output_dim: int, output dimension
-           
-#     """
-#     def __init__(
-#         self, config: MLPConfig, input_dim: int, output_dim: int):
-#         super().__init__(config)
-#         self.config = config
-#         self.input_dim = input_dim
-#         self.hidden_dim = self.config.hidden_dim
-#         self.output_dim = self.output_dim
-#         assert self.config.activation in activations, "Activation function not supported"
-#         self.config.activation = getattr(nn, self.config.activation)()
-#         # Input Layers 
-#         layers = [
-#             nn.Linear(input_dim, self.config.hidden_dim),
-#             self.activation,
-#             nn.Dropout(self.config.dropout)
-#         ]
-#         # Hidden Layers
-#         for _ in range(self.config.num_layers-2):
-#             layers += [
-#                 nn.Linear(self.config.hidden_dim, self.config.hidden_dim),
-#                 self.activation,
-#                 nn.Dropout(self.config.dropout)
-#             ]
-#         # Output Layer
-#         layers += [
-#             nn.Linear(self.config.hidden_dim, self.output_dim)
-#         ]
-        
-#         self.layers = nn.Sequential(*layers)
-        
-#     def forward(self, x):
-#         return self.layers(x)
 
 class QuantileMLP(BaseModel):
     """Quantile Multi-Layer Perceptron

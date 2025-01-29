@@ -185,6 +185,32 @@ class DataProcessor:
         test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
 
         return train_loader, test_loader, X_train, X_test, y_train, y_test
+    
+    def prepare_data_ANNs(self, features: np.ndarray, targets: np.ndarray) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare data for training"""
+        # Scale data
+        X = self.feature_scaler.fit_transform(features)
+        y = self.target_scaler.fit_transform(targets)
+
+        # Convert to tensors, cannot handle sequences like RNNs or CNNs
+        X_tensor = torch.FloatTensor(X)
+        y_tensor = torch.FloatTensor(y)
+
+        # Split data
+        split_idx = int(len(X_tensor) * self.config.train_test_split)
+        X_train = X_tensor[:split_idx]
+        X_test = X_tensor[split_idx:]
+        y_train = y_tensor[:split_idx]
+        y_test = y_tensor[split_idx:]
+
+        # Create dataloaders
+        train_dataset = TensorDataset(X_train, y_train)
+        test_dataset = TensorDataset(X_test, y_test)
+
+        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
+        
+        return train_loader, test_loader, X_train, X_test, y_train, y_test
 
     def rescale_predictions(self, scaled_mean: np.ndarray, scaled_variance: np.ndarray) -> ScalingResult:
         """
@@ -235,7 +261,6 @@ class DataProcessor:
         
         return self.rescale_predictions(mean_pred, var_pred)
     
-
 class EarlyStopping:
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -243,19 +268,36 @@ class EarlyStopping:
         self.counter = 0
         self.early_stop = False
         self.best_model_state = None
+        self.has_valid_state = False
     
     def __call__(self, test_loss, model):
-        if test_loss < self.best_loss:
-            self.best_loss = test_loss
-            self.best_model_state = model.state_dict()
-            self.counter = 0
+        # Check if the loss is valid (not NaN)
+        if not np.isnan(test_loss):
+            # Only update best state if we have a valid loss that's better than previous best
+            if test_loss < self.best_loss:
+                self.best_loss = test_loss
+                self.best_model_state = model.state_dict()
+                self.has_valid_state = True
+                self.counter = 0
+            else:
+                self.counter += 1
+                if self.counter >= self.config.patience:
+                    self.early_stop = True
         else:
+            # In case of NaN, increment counter but don't update model state
             self.counter += 1
             if self.counter >= self.config.patience:
                 self.early_stop = True
-
+    
     def load_best_model(self, model):
-        model.load_state_dict(self.best_model_state)
+        if self.has_valid_state and self.best_model_state is not None:
+            model.load_state_dict(self.best_model_state)
+        else:
+            # If we never got a valid state, keep the current model state
+            pass
+    
+    def get_best_loss(self):
+        return self.best_loss if self.has_valid_state else float('inf')
 
 class ModelTrainer:
     """Handles model training and evaluation"""
@@ -728,12 +770,19 @@ class ModelOptimisation:
         Returns:
             tuple: (model, criterion, use_monte_carlo)
         """
-        model_kwargs = {
-            'config': self.model_config,
-            'input_dim': X_train.shape[2],
-            'output_dim': y_train.shape[1]
-        }
-        
+        if self.model_class == MLP:
+            model_kwargs = {
+                'config': self.model_config,
+                'input_dim': X_train.shape[1],
+                'output_dim': y_train.shape[1]
+            }
+        else:
+            model_kwargs = {
+                'config': self.model_config,
+                'input_dim': X_train.shape[2],
+                'output_dim': y_train.shape[1]
+            }
+            
         # Start with base configuration
         use_monte_carlo = False
         
@@ -783,6 +832,11 @@ class ModelOptimisation:
                 if name == 'norm_type':
                     norm_types = {0: None, 1: 'layer', 2: 'batch'}
                     setattr(config_obj, name, norm_types[int(value)])
+                    
+                if name == 'activation':
+                    activations = {0: "ReLU", 1: "Softplus", 2: "Tanh", 3: "SELU", 4: "LeakyReLU", 5: "Sigmoid", 6: "Softmax", 7: "LogSoftmax"}
+                    setattr(config_obj, name, activations[int(value)])
+                
                 
             elif isinstance(bounds, list):  # List parameter (for CNN)
                 num_values = len(bounds)
@@ -795,11 +849,16 @@ class ModelOptimisation:
 
         simulation_results = self.simulator.run_multiple_simulations()
         features, targets = self.converter.convert(simulation_results)        
-
+    
         data_processor = self.data_processor(self.train_config)
-        (train_loader, test_loader, X_train, X_test,
-         y_train, y_test) = data_processor.prepare_data(features, targets)
+        if self.model_class == MLP:
+            (train_loader, test_loader, X_train, X_test,
+            y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
+        else:    
+            (train_loader, test_loader, X_train, X_test,
+            y_train, y_test) = data_processor.prepare_data(features, targets)
         
+            
         self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion(X_train, y_train)
         
         # Train the model
@@ -807,7 +866,7 @@ class ModelOptimisation:
         self.model, _, average_loss = self.trainer.train(train_loader, test_loader, criterion)
         
         if np.isnan(average_loss):
-            average_loss = float('inf')
+            average_loss = 1e6
         
         # Apply Monte Carlo prediction if enabled
         if use_monte_carlo:
@@ -1116,7 +1175,12 @@ def main():
         dropout = 0.1
         )
     
-
+    MLP_Config = MLPConfig(
+        hidden_dim = 64,
+        num_layers = 2,
+        dropout = 0.2,
+        activation = 'ReLU'
+    )
     # Initialize components
 
     simulator = CSTRSimulator(CSTR_sim_config)
@@ -1133,14 +1197,23 @@ def main():
      y_train, y_test) = data_processor.prepare_data(features, targets)
 
     # Initialize model (example with StandardLSTM)
-    # model = StandardCNN(
-    #     config=training_config,
+    # model = CNN(
+    #     config=CNN_Config,
     #     input_dim=X_train.shape[2],
     #     output_dim=y_train.shape[1],
+    #     var = True
     # )
     quantiles = [0.25, 0.5, 0.75]
-    model = LSTM(
-        config=LSTM_Config,
+    # model = LSTM(
+    #     config=LSTM_Config,
+    #     input_dim=X_train.shape[2],
+    #     output_dim=y_train.shape[1],
+    #     var = True
+    # )
+    print('X_train shape:', X_train.shape[2])
+    print('outptu_dim:', y_train.shape[1])
+    model = MLP(
+        config = MLP_Config,
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[1],
         var = True
@@ -1208,7 +1281,7 @@ def main():
     actions = features[:, -int(features.shape[1] - targets.shape[1]):]
     # print(actions.shape)
     # visualizer.plot_actions(actions, action_names, num_simulations = 10)
-    model_class = LSTM
+    model_class = CNN
     trainer_class = ModelTrainer
     
     CNN_config_bounds = {
@@ -1250,12 +1323,30 @@ def main():
         'norm_type': (0, 2),
     }
     
+    MLP_config_bounds = {
+        # Training config bounds
+        'batch_size': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'num_epochs': (50, 500),
+        'learning_rate': (0.0001, 0.1),
+        'time_step': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'horizon': (1, 10),
+        'weight_decay': (1e-6, 0.1),
+        'factor': (0.1, 0.99),
+        'patience': (5, 100),
+        'delta': (1e-6, 0.1),   
+        
+        # MLP specific bounds
+        'hidden_dim': (32, 512),
+        'num_layers': (1, 50),
+        'dropout': (0.1, 0.9),
+        'activation': (0, 2),
+    }
     
-    # optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-    #                               config_bounds=LSTM_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
-    #                               data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, monte_carlo=MC_Prediction)
-    
-    # best_params, best_loss = optimizer.optimise()
+    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, MLP_Config,
+                                  config_bounds=MLP_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+                                  data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, variance=True)
+    path = 'best_model.pth'
+    best_params, best_loss = optimizer.optimise(path)
     
     # checkpoint = torch.load('best_model.pth')
     # print(checkpoint.keys())
