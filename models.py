@@ -805,7 +805,7 @@ class MLP(BaseModel):
         
         # Adjust output dimension for quantile regression
         if self.quantiles is not None:
-            self.output_dim = output_dim * len(quantiles)
+            self.output_dim = self.output_dim * len(quantiles)
             
         # Validate activation function
         assert config.activation in activations, "Activation function not supported"
@@ -841,9 +841,9 @@ class MLP(BaseModel):
         self.layers = nn.Sequential(*layers)
         
         # Output layers
-        self.fc = nn.Linear(current_dim, output_dim)
+        self.fc = nn.Linear(current_dim, self.output_dim)
         if self.var:
-            self.fc_logvar = nn.Linear(current_dim, output_dim)
+            self.fc_logvar = nn.Linear(current_dim, self.output_dim)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layers(x)
@@ -854,6 +854,7 @@ class MLP(BaseModel):
             return self.fc(x), var
             
         if self.quantiles is not None:
+            gramah = self.fc(x)
             # Return reshaped output for quantile regression
             return self.fc(x).view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
             

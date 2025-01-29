@@ -653,7 +653,8 @@ class MC_Prediction:
 class ModelEvaluation:
     """Model evaluation class, to determine the prediction error (MSE, MAE etc.),
     also predicts the coverage interval, based on the prediction uncertainty"""
-    def __init__(self, model: BaseModel, y_test: np.ndarray, y_pred: Union[np.ndarray, Dict[float, np.ndarray]], test_var: Optional[np.ndarray] = None):
+    def __init__(self, model: BaseModel, y_test: np.ndarray, y_pred: Union[np.ndarray, Dict[float, np.ndarray]],
+                 test_var: Optional[np.ndarray] = None):
         self.model = model
         self.y_test = y_test
         self.y_pred = y_pred
@@ -665,6 +666,23 @@ class ModelEvaluation:
         else:
             y_pred = self.y_pred
         return np.mean((self.y_test - y_pred) ** 2)
+    
+    def MAE(self):
+        if isinstance(self.y_pred, dict):
+            y_pred = self.y_pred[0.5]
+        else:
+            y_pred = self.y_pred
+        return np.mean(np.abs(self.y_test - y_pred))
+    
+    def RMSE(self):
+        return np.sqrt(self.MSE())
+    
+    def MAPE(self):
+        if isinstance(self.y_pred, dict):
+            y_pred = self.y_pred[0.5]
+        else:
+            y_pred = self.y_pred
+        return np.mean(np.abs((self.y_test - y_pred) / self.y_test)) * 100
     
     def coverage(self):
         """Calculate coverage ratios at 80%, 90%, 95% and 99% confidence intervals.
@@ -1193,9 +1211,11 @@ def main():
     
     data_processor = DataProcessor(training_config)
     # Prepare data
-    (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test) = data_processor.prepare_data(features, targets)
+    # (train_loader, test_loader, X_train, X_test, 
+    #  y_train, y_test) = data_processor.prepare_data(features, targets)
 
+    (train_loader, test_loader, X_train, X_test, 
+     y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
     # Initialize model (example with StandardLSTM)
     # model = CNN(
     #     config=CNN_Config,
@@ -1208,22 +1228,22 @@ def main():
     #     config=LSTM_Config,
     #     input_dim=X_train.shape[2],
     #     output_dim=y_train.shape[1],
-    #     var = True
+    #     quantiles = quantiles
     # )
-    print('X_train shape:', X_train.shape[2])
-    print('outptu_dim:', y_train.shape[1])
+    # print('X_train shape:', X_train.shape[2])
+    # print('outptu_dim:', y_train.shape[1])
     model = MLP(
         config = MLP_Config,
-        input_dim=X_train.shape[2],
+        input_dim=X_train.shape[1],
         output_dim=y_train.shape[1],
-        var = True
+        quantiles = quantiles
     )
 
     # Train model
     # criterion = nn.MSELoss()
-    # criterion = QuantileLoss(quantiles)
+    criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    criterion = nn.GaussianNLLLoss()
+    # criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -1240,18 +1260,19 @@ def main():
     # Inverse transform predictions
     scaler = data_processor.target_scaler
     
-    # inverse_transformer = QuantileTransform(quantiles, scaler)
-    # train_pred = inverse_transformer.inverse_transform(train_pred)
-    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    
+    inverse_transformer = QuantileTransform(quantiles, scaler)
+    train_pred = inverse_transformer.inverse_transform(train_pred)
+    test_pred = inverse_transformer.inverse_transform(test_pred)
     
     
-    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
-    train_mean = rescaled_train_pred.mean
-    train_var = rescaled_train_pred.variance
+    # rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
+    # train_mean = rescaled_train_pred.mean
+    # train_var = rescaled_train_pred.variance
     
-    rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
-    test_mean = rescaled_test_pred.mean
-    test_var = rescaled_test_pred.variance
+    # rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
+    # test_mean = rescaled_test_pred.mean
+    # test_var = rescaled_test_pred.variance
 
     
     
