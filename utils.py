@@ -14,7 +14,7 @@ from torch.distributions import Normal
 import GPyOpt
 from GPyOpt.methods import BayesianOptimization
 from tqdm import tqdm
-from base import TrainingConfig, BaseModel, CNNConfig, LSTMConfig
+from base import *
 from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
@@ -1193,6 +1193,15 @@ def main():
         dropout = 0.1
         )
     
+    TF_Config = TFConfig(
+        num_layers = 2,
+        hidden_dim = 64,
+        d_model = 64,
+        num_heads = 4,
+        dim_feedforward = 128,
+        dropout = 0.2,
+    )
+    
     MLP_Config = MLPConfig(
         hidden_dim = 64,
         num_layers = 2,
@@ -1215,7 +1224,7 @@ def main():
     #  y_train, y_test) = data_processor.prepare_data(features, targets)
 
     (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
+     y_train, y_test) = data_processor.prepare_data(features, targets)
     # Initialize model (example with StandardLSTM)
     # model = CNN(
     #     config=CNN_Config,
@@ -1232,18 +1241,24 @@ def main():
     # )
     # print('X_train shape:', X_train.shape[2])
     # print('outptu_dim:', y_train.shape[1])
-    model = MLP(
-        config = MLP_Config,
-        input_dim=X_train.shape[1],
+    # model = MLP(
+    #     config = MLP_Config,
+    #     input_dim=X_train.shape[1],
+    #     output_dim=y_train.shape[1],
+    #     quantiles = quantiles
+    # )
+    model = TransformerPredictor(
+        config=TF_Config,
+        input_dim=X_train.shape[2],
         output_dim=y_train.shape[1],
-        quantiles = quantiles
+        var = True
     )
 
     # Train model
     # criterion = nn.MSELoss()
-    criterion = QuantileLoss(quantiles)
+    # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    # criterion = nn.GaussianNLLLoss()
+    criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -1261,18 +1276,18 @@ def main():
     scaler = data_processor.target_scaler
     
     
-    inverse_transformer = QuantileTransform(quantiles, scaler)
-    train_pred = inverse_transformer.inverse_transform(train_pred)
-    test_pred = inverse_transformer.inverse_transform(test_pred)
+    # inverse_transformer = QuantileTransform(quantiles, scaler)
+    # train_pred = inverse_transformer.inverse_transform(train_pred)
+    # test_pred = inverse_transformer.inverse_transform(test_pred)
     
     
-    # rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
-    # train_mean = rescaled_train_pred.mean
-    # train_var = rescaled_train_pred.variance
+    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
+    train_mean = rescaled_train_pred.mean
+    train_var = rescaled_train_pred.variance
     
-    # rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
-    # test_mean = rescaled_test_pred.mean
-    # test_var = rescaled_test_pred.variance
+    rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
+    test_mean = rescaled_test_pred.mean
+    test_var = rescaled_test_pred.variance
 
     
     

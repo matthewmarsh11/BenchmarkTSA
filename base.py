@@ -46,6 +46,17 @@ class MLPConfig:
     activation: str = 'ReLU'
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+@dataclass
+class TFConfig:
+    """Configuration for Transformer model"""
+    num_layers: int
+    hidden_dim: int
+    d_model: int
+    num_heads: int
+    dim_feedforward: int
+    dropout: float = 0.2
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
 class BaseModel(nn.Module, ABC):
     """Abstract base class for all models"""
     def __init__(self, config: TrainingConfig):

@@ -6,6 +6,7 @@ from typing import List, Optional
 from dataclasses import dataclass
 import torch.nn.functional as F
 from torch.autograd import Variable
+import math
 
 # LSTMs
 
@@ -861,7 +862,6 @@ class MLP(BaseModel):
         # Standard or Monte Carlo dropout output
         return self.fc(x)
 
-
 class QuantileMLP(BaseModel):
     """Quantile Multi-Layer Perceptron
         
@@ -916,20 +916,107 @@ class MLR(BaseModel):
         return self.fc(x)
     
 # Transformers
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-class TimeSeriesTransformer(BaseModel):
-    """Time Series Transformer Model"""
-    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int):
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+        """
+        return x + self.pe[:x.size(0)]
+
+# Encoder Only Model
+class TransformerEncoder(BaseModel):
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int,
+                 quantiles: Optional[List[float]] = None, 
+                 monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
         super().__init__(config)
         self.config = config
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.transformer = nn.TransformerEncoder
+        
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
+        
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+        
+
+        # Input projection layer
+        self.input_projection = nn.Linear(self.input_dim, self.config.d_model)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(self.config.d_model)
+        
+        # Transformer encoder
+        encoder_layers = nn.TransformerEncoderLayer(
+            d_model=self.config.d_model,
+            nhead=self.config.num_heads,
+            dim_feedforward=self.config.dim_feedforward,
+            dropout=self.config.dropout,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=self.config.num_layers)
+        
+        # Output layers
+        self.output_layer = nn.Sequential(
+            nn.Linear(self.config.d_model, self.config.dim_feedforward),
+            nn.ReLU(),
+            nn.Dropout(self.config.dropout),
+            nn.Linear(self.config.dim_feedforward, self.output_dim)
+        )
+        
+        if self.var:            
+            # self.fc_logvar = nn.Linear(self.config.d_model, self.output_dim)
+            self.fc_logvar = nn.Sequential(
+                nn.Linear(self.config.d_model, self.config.dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(self.config.dim_feedforward, self.output_dim)
+            )
+
+    def forward(self, x):
+        # Project input to d_model dimensions
+        x = self.input_projection(x)
+        
+        # Create mask for transformer (optional, useful for variable length sequences)
+        mask = None
+        
+        # Apply transformer encoder
+        output = self.transformer_encoder(x, mask)
+        
+        # Take the last sequence element for prediction
+        output_seq = output[:, -1, :]
+        
+        # Project to output dimension
+        output = self.output_layer(output_seq)
         
         
+        if self.var:
+            var = torch.exp(self.fc_logvar(output_seq))
+            return output, var
+        
+        if self.monte_carlo:
+            output = nn.Dropout(p=self.config.dropout)(output_seq)
+            return self.output_layer(output)
+        
+        if self.quantiles is not None:
+            return output.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        return output
         
 # Graph Neural Networks (GNNs)
 
 class ST_GCN(BaseModel):
     """Spatial-Temporal Graph Convolutional Network"""
+    
     
