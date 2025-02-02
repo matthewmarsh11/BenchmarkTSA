@@ -57,6 +57,12 @@ class TFConfig:
     dropout: float = 0.2
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+@dataclass
+class MLRConfig:
+    """Configuration for MLR model"""
+    dropout: float = 0.2
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
 class BaseModel(nn.Module, ABC):
     """Abstract base class for all models"""
     def __init__(self, config: TrainingConfig):

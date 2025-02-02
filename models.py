@@ -908,22 +908,58 @@ class QuantileMLP(BaseModel):
 
 class MLR(BaseModel):
     """Multi Linear Regression Model"""
-    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int):
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int, 
+                 quantiles: Optional[List[float]] = None, 
+                 monte_carlo: Optional[bool] = False, 
+                 var: Optional[bool] = False):
+        
         super().__init__(config)
-        self.fc = nn.Linear(input_dim, output_dim)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        
+        self.quantiles = quantiles
+        self.var = var
+        self.monte_carlo = monte_carlo
+        
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+        
+        if self.var:
+            self.logvar = nn.Linear(self.input_dim, self.output_dim)
+        
+        
+        self.fc = nn.Linear(self.input_dim, self.output_dim)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc(x)
+        out = self.fc(x)
+        
+        if self.var:
+            var = torch.exp(self.logvar(x))
+            return out, var
+        
+        if self.quantiles is not None:
+            return out.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        if self.monte_carlo:
+            out = nn.Dropout(p=self.config.dropout)(out)
+            return out
+        
+        return out
+        
     
 # Transformers
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
         position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        
+        # Ensure div_term matches the even dimensions of d_model
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
         pe = torch.zeros(max_len, 1, d_model)
         pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term[:d_model//2])
+        
         self.register_buffer('pe', pe)
 
     def forward(self, x):

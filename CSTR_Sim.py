@@ -140,19 +140,30 @@ class CSTRSimulator():
             'normal_uncertainty': self.uncertainty_percentages,
             'uncertainty_bounds': self.uncertainty_space
         }
+        # Create a noiseless environment for comparison
+        noiseless_env_params = env_params.copy()
+        noiseless_env_params['noise'] = False
+        noiseless_env_params['noise_percentage'] = 0
         
         env = make_env(env_params)
+        noiseless_env = make_env(noiseless_env_params)
         
+        # Create lists to store observed states, disturbances, and actions
         observed_states = []
         disturbance_values = []
+        actions = []
         obs, _ = env.reset()
         done = False
-        actions = []
+        
+        
+        noiseless_observed_states = []
+        noiseless_disturbance_values = []
+        obs, _ = noiseless_env.reset()
         
         num_actions = np.random.randint(0, self.config.T // 2)
         initial_action = np.random.uniform(self.action_space['low'], self.action_space['high'])
         initial_action = self._normalize_action(initial_action)
-        
+        # Simulation loop
         while not done:
             if not actions:
                 action = initial_action
@@ -165,92 +176,143 @@ class CSTRSimulator():
                     action = self._normalize_action(actions[-1])
             
             obs, _, done, _, info = env.step(action)
+            noiseless_obs, _, _, _, _ = noiseless_env.step(action)
             
             disturbance = obs[3:5]
             uncertain_params = obs[5:]
             obs = obs[:3]
             
+            noiseless_disturbance = noiseless_obs[3:5]
+            noiseless_uncertain_params = noiseless_obs[5:]
+            noiseless_obs = noiseless_obs[:3]
+            
             obs_unnorm = self._unnormalize_observation(obs)
             disturbance_unnorm = self._unnormalize_disturbance(disturbance, disturbance_space)
             actions_unnorm = self._unnormalize_action(action)
             
+            noiseless_obs_unnorm = self._unnormalize_observation(noiseless_obs)
+            noiseless_disturbance_unnorm = self._unnormalize_disturbance(noiseless_disturbance, disturbance_space)
+            
             observed_states.append(obs_unnorm)
             disturbance_values.append(disturbance_unnorm)
+            
+            noiseless_observed_states.append(noiseless_obs_unnorm)
+            noiseless_disturbance_values.append(noiseless_disturbance_unnorm)
+            
             actions.append(actions_unnorm)
         
-        return self._format_results(observed_states, disturbance_values, actions)
-    
-    def run_multiple_simulations(self) -> List[SimulationResult]:
-        """
-        Run multiple simulations and return results.
+        return self._format_results(observed_states, disturbance_values, actions), self._format_results(noiseless_observed_states, noiseless_disturbance_values, actions)
         
-        Args:
-            num_simulations (int): Number of simulations to run
-            time_steps (int): Number of time steps per simulation
-            
+    def run_multiple_simulations(self) -> Tuple[List[SimulationResult], List[SimulationResult]]:
+        """
+        Run multiple simulations and return both noisy and noiseless results.
+        
         Returns:
-            List[SimulationResult]: List of simulation results
+            Tuple[List[SimulationResult], List[SimulationResult]]: Lists of (noisy_results, noiseless_results)
         """
-        return [self.simulate() for _ in range(self.config.n_simulations)]
-
-    def plot_results(self, results: List[SimulationResult]) -> None:
+        noisy_results = []
+        noiseless_results = []
+        
+        for _ in range(self.config.n_simulations):
+            noisy_sim, noiseless_sim = self.simulate()
+            noisy_results.append(noisy_sim)
+            noiseless_results.append(noiseless_sim)
+        
+        return noisy_results, noiseless_results
+    
+    def plot_results(self, noisy_results: List[SimulationResult], noiseless_results: List[SimulationResult]) -> None:
         """
-        Plot results from multiple simulations.
+        Plot all simulation results:
+        - States (Ca, T) with both noisy and noiseless data
+        - Actions (Tc) from noisy data only
+        - Disturbances (Ti, Caf) from noisy data only
         
         Args:
-            results (List[SimulationResult]): List of simulation results
+            noisy_results (List[SimulationResult]): List of noisy simulation results
+            noiseless_results (List[SimulationResult]): List of noiseless simulation results
         """
-        # Create subplots for observed states
-        fig_obs, axs_obs = plt.subplots(3, 1, figsize=(10, 8))
+        # Create three separate figures for states, actions, and disturbances
+        fig_states, axs_states = plt.subplots(2, 1, figsize=(10, 8))
+        fig_act, ax_act = plt.subplots(1, 1, figsize=(10, 4))
         fig_dist, axs_dist = plt.subplots(2, 1, figsize=(10, 8))
-        fig_act, axs_act = plt.subplots(1, 1, figsize=(10, 4))
         
-        # Plot observed states
-        for i, result in enumerate(results):
-            axs_obs[0].plot(result.observed_states['Ca'], label=f'Simulation {i+1}')
-            axs_obs[0].set_title('Concentration of A (Ca)')
-            axs_obs[0].set_xlabel('Time')
-            axs_obs[0].set_ylabel('Ca')
+        # Get a color for each simulation pair
+        colors = plt.cm.tab10(np.linspace(0, 1, len(noisy_results)))
+        
+        # Plot states (with noisy/noiseless comparison)
+        for i, ((noisy, noiseless), color) in enumerate(zip(zip(noisy_results, noiseless_results), colors)):
+            # Concentration - Ca
+            axs_states[0].plot(noisy.observed_states['Ca'], 
+                            label=f'Simulation {i+1}', 
+                            color=color,
+                            alpha=0.7)
+            axs_states[0].plot(noiseless.observed_states['Ca'], 
+                            label=f'Noiseless {i+1}', 
+                            color=color,
+                            linestyle='--', 
+                            alpha=0.7)
             
-            axs_obs[1].plot(result.observed_states['T'], label=f'Simulation {i+1}')
-            axs_obs[1].set_title('Temperature (T)')
-            axs_obs[1].set_xlabel('Time')
-            axs_obs[1].set_ylabel('T')
+            # Temperature - T
+            axs_states[1].plot(noisy.observed_states['T'], 
+                            label=f'Simulation {i+1}', 
+                            color=color,
+                            alpha=0.7)
+            axs_states[1].plot(noiseless.observed_states['T'], 
+                            label=f'Noiseless {i+1}', 
+                            color=color,
+                            linestyle='--', 
+                            alpha=0.7)
             
-            axs_obs[2].plot(result.observed_states['Ca_s'], label=f'Simulation {i+1}')
-            axs_obs[2].set_title('Setpoint - (Ca_s)')
-            axs_obs[2].set_xlabel('Time')
-            axs_obs[2].set_ylabel('Ca_s')
-        
-        # Plot disturbances
-        for i, result in enumerate(results):
-            axs_dist[0].plot(result.disturbances['Ti'], label=f'Simulation {i+1}')
-            axs_dist[0].set_title('Inlet Temperature (Ti)')
-            axs_dist[0].set_xlabel('Time')
-            axs_dist[0].set_ylabel('Ti')
+            # Plot actions (noisy only)
+            ax_act.plot(noisy.actions['Tc'], 
+                    label=f'Simulation {i+1}', 
+                    color=color,
+                    alpha=0.7)
             
-            axs_dist[1].plot(result.disturbances['Caf'], label=f'Simulation {i+1}')
-            axs_dist[1].set_title('Feed Concentration (Caf)')
-            axs_dist[1].set_xlabel('Time')
-            axs_dist[1].set_ylabel('Caf')
+            # Plot disturbances (noisy only)
+            axs_dist[0].plot(noisy.disturbances['Ti'], 
+                            label=f'Simulation {i+1}', 
+                            color=color,
+                            alpha=0.7)
+            axs_dist[1].plot(noisy.disturbances['Caf'], 
+                            label=f'Simulation {i+1}', 
+                            color=color,
+                            alpha=0.7)
         
-        # Plot actions
-        for i, result in enumerate(results):
-            axs_act.plot(result.actions['Tc'], label=f'Simulation {i+1}')
-            axs_act.set_title('Coolant Temperature (Tc)')
-            axs_act.set_xlabel('Time')
-            axs_act.set_ylabel('Tc')
+        # Set titles and labels for states
+        axs_states[0].set_title('Concentration of A (Ca)')
+        axs_states[0].set_xlabel('Time')
+        axs_states[0].set_ylabel('Ca')
+        axs_states[1].set_title('Temperature (T)')
+        axs_states[1].set_xlabel('Time')
+        axs_states[1].set_ylabel('T')
         
-        # Add legends
-        for ax in axs_obs:
+        # Set titles and labels for actions
+        ax_act.set_title('Coolant Temperature (Tc)')
+        ax_act.set_xlabel('Time')
+        ax_act.set_ylabel('Tc')
+        
+        # Set titles and labels for disturbances
+        axs_dist[0].set_title('Inlet Temperature (Ti)')
+        axs_dist[0].set_xlabel('Time')
+        axs_dist[0].set_ylabel('Ti')
+        axs_dist[1].set_title('Feed Concentration (Caf)')
+        axs_dist[1].set_xlabel('Time')
+        axs_dist[1].set_ylabel('Caf')
+        
+        # Add legends to all plots
+        for ax in axs_states:
             ax.legend(loc='upper right', fontsize='small', ncol=2)
+        ax_act.legend(loc='upper right', fontsize='small', ncol=2)
         for ax in axs_dist:
             ax.legend(loc='upper right', fontsize='small', ncol=2)
-        axs_act.legend(loc='upper right', fontsize='small', ncol=2)
         
-        plt.tight_layout()
+        # Adjust layouts
+        for fig in [fig_states, fig_act, fig_dist]:
+            fig.tight_layout()
+        
         plt.show()
-
+    
     def _normalize_action(self, action: Union[float, np.ndarray]) -> np.ndarray:
         """Normalize action to [-1, 1] range."""
         return 2 * (action - self.action_space['low']) / (

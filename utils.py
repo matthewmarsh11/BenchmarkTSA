@@ -788,7 +788,7 @@ class ModelOptimisation:
         Returns:
             tuple: (model, criterion, use_monte_carlo)
         """
-        if self.model_class == MLP:
+        if self.model_class == MLP or self.model_class == MLR:
             model_kwargs = {
                 'config': self.model_config,
                 'input_dim': X_train.shape[1],
@@ -803,8 +803,12 @@ class ModelOptimisation:
             
         # Start with base configuration
         use_monte_carlo = False
+        if hasattr(self.model_config, 'num_heads') and hasattr(self.model_config, 'd_model'):
+            # Ensure d_model is divisible by num_heads
+            if self.model_config.d_model % self.model_config.num_heads != 0:
+                # Round d_model up to nearest multiple of num_heads
+                self.model_config.d_model = ((self.model_config.d_model + self.model_config.num_heads - 1) // self.model_config.num_heads) * self.model_config.num_heads
         
-        # Add uncertainty estimation features based on flags
         if self.variance:
             model_kwargs['var'] = True
             criterion = nn.GaussianNLLLoss()
@@ -854,7 +858,6 @@ class ModelOptimisation:
                 if name == 'activation':
                     activations = {0: "ReLU", 1: "Softplus", 2: "Tanh", 3: "SELU", 4: "LeakyReLU", 5: "Sigmoid", 6: "Softmax", 7: "LogSoftmax"}
                     setattr(config_obj, name, activations[int(value)])
-                
                 
             elif isinstance(bounds, list):  # List parameter (for CNN)
                 num_values = len(bounds)
@@ -1208,6 +1211,10 @@ def main():
         dropout = 0.2,
         activation = 'ReLU'
     )
+    
+    MLR_Config = MLRConfig(
+        dropout = 0.2
+    )
     # Initialize components
 
     simulator = CSTRSimulator(CSTR_sim_config)
@@ -1224,7 +1231,7 @@ def main():
     #  y_train, y_test) = data_processor.prepare_data(features, targets)
 
     (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test) = data_processor.prepare_data(features, targets)
+     y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
     # Initialize model (example with StandardLSTM)
     # model = CNN(
     #     config=CNN_Config,
@@ -1247,9 +1254,16 @@ def main():
     #     output_dim=y_train.shape[1],
     #     quantiles = quantiles
     # )
-    model = TransformerPredictor(
-        config=TF_Config,
-        input_dim=X_train.shape[2],
+    # model = TransformerEncoder(
+    #     config=TF_Config,
+    #     input_dim=X_train.shape[2],
+    #     output_dim=y_train.shape[1],
+    #     var = True
+    # )
+    
+    model = MLR(
+        config=MLR_Config,
+        input_dim=X_train.shape[1],
         output_dim=y_train.shape[1],
         var = True
     )
@@ -1317,7 +1331,7 @@ def main():
     actions = features[:, -int(features.shape[1] - targets.shape[1]):]
     # print(actions.shape)
     # visualizer.plot_actions(actions, action_names, num_simulations = 10)
-    model_class = CNN
+    model_class = MLR
     trainer_class = ModelTrainer
     
     CNN_config_bounds = {
@@ -1378,8 +1392,44 @@ def main():
         'activation': (0, 2),
     }
     
-    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, MLP_Config,
-                                  config_bounds=MLP_config_bounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+    # First set the bounds for LSTM Model
+    TF_ConfigBounds = {
+            'batch_size': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+            'num_epochs': (50, 200),
+            'learning_rate': (0.0001, 0.1),
+            'time_step': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+            'horizon': (1, 10),
+            'weight_decay': (1e-6, 0.1),
+            'factor': (0.1, 0.99),
+            'patience': (5, 100),
+            'delta': (1e-6, 0.1),   
+            
+            # LSTM specific bounds
+            'num_layers': (1, 15),
+            'hidden_dim': (32, 256),
+            'd_model': (32, 256),
+            'num_heads': (1, 8),
+            'dim_feedforward': (32, 256),
+            'dropout': (0.1, 0.9),
+    }
+    
+    MLR_ConfigBounds = {
+            'batch_size': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+            'num_epochs': (50, 200),
+            'learning_rate': (0.0001, 0.1),
+            'time_step': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
+            'horizon': (1, 10),
+            'weight_decay': (1e-6, 0.1),
+            'factor': (0.1, 0.99),
+            'patience': (5, 100),
+            'delta': (1e-6, 0.1), 
+            
+            'dropout': (0.1, 0.9),
+    }
+        
+    
+    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, MLR_Config,
+                                  config_bounds=MLR_ConfigBounds, simulator=CSTRSimulator, converter=CSTRConverter, 
                                   data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, variance=True)
     path = 'best_model.pth'
     best_params, best_loss = optimizer.optimise(path)
