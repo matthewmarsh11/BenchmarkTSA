@@ -407,8 +407,8 @@ class Visualizer:
     @staticmethod
     def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
                          test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
-                         y_train: np.ndarray, y_test: np.ndarray,
-                         feature_names: list, num_simulations: int, num_plots: Optional[int] = None, 
+                         noisy_data, noiseless_data: np.ndarray,
+                         feature_names: list, num_simulations: int, sequence_length: int,
                          train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
         """
         Plots predictions and ground truth data.
@@ -416,9 +416,10 @@ class Visualizer:
         Args:
             train_pred (np.ndarray): Training predictions (time steps, features).
             test_pred (np.ndarray): Testing predictions (time steps, features).
-            y_train (np.ndarray): Training ground truth (time steps, features).
-            y_test (np.ndarray): Testing ground truth (time steps, features).
+            noisy_data (np.ndarray): Simulation with noise (time steps, features).
+            noiseless_data (np.ndarray): Simulation without the noise (time steps, features).
             feature_names (list): List of feature names, one per column in the data.
+            sequence_length (int): Length of the sequence.
             num_simulations (int): Number of simulations in the data.
         """
         
@@ -432,17 +433,20 @@ class Visualizer:
         
         for i, sim in enumerate(feature_names):
             plt.figure(figsize=(10, 6))
+            
             # Plot training predictions and ground truth
-            plt.plot(train_pred[:, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
-            plt.plot(y_train[:, i], label=f'{sim} Train Ground Truth', color='green', alpha=0.7)
+            plt.plot(range(sequence_length, sequence_length + len(train_pred)),
+                train_pred[:, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
+            
             
             # Plot testing predictions and ground truth
             offset = len(train_pred)
-            plt.plot(range(offset, offset + len(test_pred)), 
+            plt.plot(range(sequence_length + offset, sequence_length + offset + len(test_pred)), 
                     test_pred[:, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
-            plt.plot(range(offset, offset + len(y_test)), 
-                    y_test[:, i], label=f'{sim} Test Ground Truth', color='orange', alpha=0.7)
-        
+            
+            plt.plot(noisy_data[:, i], label=f'{sim} Noisy Simulation', color='green', alpha=0.7)
+            plt.plot(noiseless_data[:, i], label=f'{sim} Noiseless Data', color='black', linestyle = 'dashed', alpha=0.7)
+            
             plt.title(f'{sim} Predictions')
             plt.xlabel('Time Step')
             plt.ylabel(sim)
@@ -452,13 +456,23 @@ class Visualizer:
                 keys = train_pred_new.keys()
                 max_key = max(keys)
                 min_key = min(keys)
-                plt.fill_between(range(len(train_pred)), train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
-                plt.fill_between(range(offset, offset + len(test_pred)), test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
+                plt.fill_between(range(sequence_length, sequence_length + len(train_pred)),
+                                 train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', 
+                                 alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
+                
+                plt.fill_between(range(sequence_length + offset, sequence_length + offset + len(test_pred)), 
+                                 test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', 
+                                 alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
             
             if train_var is not None:
-                plt.fill_between(range(len(train_pred)), train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]), color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
+                plt.fill_between(range(sequence_length, sequence_length + len(train_pred)), 
+                                train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]),
+                                color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
             if test_var is not None:
-                plt.fill_between(range(offset, offset + len(test_pred)), test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]), color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
+                plt.fill_between(range(sequence_length + offset, sequence_length + offset + len(test_pred)),
+                                 test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]),
+                                 color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
+                
             plt.tight_layout()
             plt.show()
     
@@ -1165,7 +1179,6 @@ class ConformalQuantile:
         
         return {'conformal_intervals': conformal_intervals,
                 'equivalent_quantiles': (lower_q, upper_q)}
-
 
 def main():
     # Configurations
