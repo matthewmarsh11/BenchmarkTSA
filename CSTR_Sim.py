@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Iterator
 from dataclasses import dataclass
 
+np.random.seed(42)
+
 @dataclass
 class SimulationResult:
     """Container for simulation results."""
@@ -78,8 +80,10 @@ class CSTRSimulator():
 
     def generate_disturbances(self) -> Tuple[Dict[str, List[float]], Dict[str, np.ndarray]]:
         """Generate random disturbances for the simulation."""
-        nominal_temp = 335
-        nominal_conc = 0.75
+        disturbance_space = {'low': np.array([320, 0.7]), 'high': np.array([350, 0.8])}
+        
+        nominal_temp = np.random.uniform(disturbance_space['low'][0], disturbance_space['high'][0])
+        nominal_conc = np.random.uniform(disturbance_space['low'][1], disturbance_space['high'][1])
         
         # Temperature disturbances
         num_changes_temp = np.random.randint(0, self.config.T // 2)
@@ -106,7 +110,7 @@ class CSTRSimulator():
             disturbances_conc.append(current_disturbance_conc)
         
         disturbances = {'Ti': disturbances_temp, 'Caf': disturbances_conc}
-        disturbance_space = {'low': np.array([320, 0.7]), 'high': np.array([350, 0.8])}
+  
         
         return disturbances, disturbance_space
 
@@ -160,17 +164,19 @@ class CSTRSimulator():
         noiseless_disturbance_values = []
         obs, _ = noiseless_env.reset()
         
-        num_actions = np.random.randint(0, self.config.T // 2)
+        num_actions = np.random.randint(0, self.config.T)
+        change_points = np.sort(np.random.choice(range(1, self.config.tsim), num_actions, replace=False))
         initial_action = np.random.uniform(self.action_space['low'], self.action_space['high'])
         initial_action = self._normalize_action(initial_action)
         # Simulation loop
         while not done:
             if not actions:
                 action = initial_action
-            elif num_actions > 0:
+            elif num_actions > 0 and env.t == change_points[0]:
                 if np.random.rand() < 0.5:
                     action = np.random.uniform(self.action_space['low'], self.action_space['high'])
                     action = self._normalize_action(action)
+                    change_points = change_points[1:]
                     num_actions -= 1
                 else:
                     action = self._normalize_action(actions[-1])

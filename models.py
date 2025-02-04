@@ -12,12 +12,13 @@ import math
 
 class LSTM(BaseModel):
     """Standard LSTM implementation"""
-    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int, quantiles: Optional[List[float]] = None, monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
+    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int, horizon: int, quantiles: Optional[List[float]] = None, monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
         """Initialise the LSTM model
         
         config: LSTMConfig, configuration for LSTM model
         input_dim: int, input dimension
         output_dim: int, output dimension
+        horizon: int, number of time steps to predict
         quantiles: List[float], quantiles for quantile regression
         monte_carlo: bool, initialise for Monte Carlo Dropout
         var: bool, initialise for negative log likelihood loss function
@@ -26,6 +27,7 @@ class LSTM(BaseModel):
         super().__init__(config)
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.horizon = horizon
         
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
@@ -94,12 +96,13 @@ class LSTM(BaseModel):
             else:
                 self.ln_layers.append(None)
         
-        self.fc = nn.Linear(lstm_output_dim, self.output_dim)
+        self.fc = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
         
         if self.var: # If using the negative log likelihood loss function, add the log variance layer
-            self.fc_logvar = nn.Linear(lstm_output_dim, self.output_dim)
+            self.fc_logvar = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
         num_directions = 2 if self.config.bidirectional else 1
         # As LSTM is layerwise, needs to be 1 or 2 depending on bidirectional
         h0 = torch.zeros(num_directions, x.size(0), 
@@ -149,7 +152,9 @@ class LSTM(BaseModel):
         if self.monte_carlo: # Dropout from the output
         # Pass the output 
             x = nn.Dropout(p=self.config.dropout)(lstm_out[:, -1, :])
-            return self.fc(x)
+            out = self.fc(x)
+            # shape of out is [batch_size, output_dim], reshape to [batch, horizon, features]
+            return out.view(-1, self.horizon, self.output_dim)
             
         
         if self.var:
@@ -157,13 +162,14 @@ class LSTM(BaseModel):
             # from the fully connected layer
             var = torch.exp(self.fc_logvar(lstm_out[:, -1, :]))
             x = self.fc(lstm_out[:, -1, :])
-            return x, var
+            
+            return x.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
         
         if self.quantiles is not None:
             # Output the quantiles
-            return x.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            return x.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
         
-        return x
+        return x.view(-1, self.horizon, self.output_dim)
 
 class StandardLSTM(BaseModel):
     """Standard LSTM implementation"""

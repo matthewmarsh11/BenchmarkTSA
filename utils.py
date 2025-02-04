@@ -145,24 +145,30 @@ class ScalingResult(NamedTuple):
 
 class DataProcessor:
     """Handles data processing and preparation"""
-    def __init__(self, config: TrainingConfig):
+    def __init__(self, config: TrainingConfig, features: np.ndarray, targets: np.ndarray):
         self.config = config
         self.feature_scaler = MinMaxScaler()
         self.target_scaler = MinMaxScaler()
+        self.features = features
+        self.targets = targets
 
-    def prepare_sequences(self, features: np.ndarray, targets: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def prepare_sequences(self, scaled_features, scaled_targets) -> Tuple[np.ndarray, np.ndarray]:
         """Create sequences for time series prediction"""
         X, y = [], []
-        for i in range(len(features) - self.config.time_step - self.config.horizon + 1):
-            X.append(features[i:i + self.config.time_step])
-            y.append(targets[i + self.config.time_step + self.config.horizon - 1])
+        for i in range(len(scaled_features) - self.config.time_step - self.config.horizon + 1):
+            # Input sequence remains the same
+            X.append(scaled_features[i:i + self.config.time_step])
+            
+            # Get future values for all target variables
+            future_values = scaled_targets[i + self.config.time_step:i + self.config.time_step + self.config.horizon]
+            y.append(future_values)
         return np.array(X), np.array(y)
 
-    def prepare_data(self, features: np.ndarray, targets: np.ndarray) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def prepare_data(self) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Prepare data for training"""
         # Scale data
-        scaled_features = self.feature_scaler.fit_transform(features)
-        scaled_targets = self.target_scaler.fit_transform(targets)
+        scaled_features = self.feature_scaler.fit_transform(self.features)
+        scaled_targets = self.target_scaler.fit_transform(self.targets)
 
         # Create sequences
         X, y = self.prepare_sequences(scaled_features, scaled_targets)
@@ -186,11 +192,11 @@ class DataProcessor:
 
         return train_loader, test_loader, X_train, X_test, y_train, y_test
     
-    def prepare_data_ANNs(self, features: np.ndarray, targets: np.ndarray) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def prepare_data_ANNs(self) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Prepare data for training"""
         # Scale data
-        X = self.feature_scaler.fit_transform(features)
-        y = self.target_scaler.fit_transform(targets)
+        X = self.feature_scaler.fit_transform(self.features)
+        y = self.target_scaler.fit_transform(self.targets)
 
         # Convert to tensors, cannot handle sequences like RNNs or CNNs
         X_tensor = torch.FloatTensor(X)
@@ -237,15 +243,55 @@ class DataProcessor:
         rescaled_variance = np.multiply(scaled_variance, (scale_factor ** 2))
         
         return ScalingResult(rescaled_mean, rescaled_variance)
+    
+    def reconstruct_sequence(self, sequence: np.ndarray) -> np.ndarray:
+        """
+        Reconstruct the sequence to its original form by reshaping it.
+        
+        Parameters:
+        -----------
+        sequence: np.ndarray
+            The sequence to reconstruct
+        horizon: int
+            The prediction horizon
 
-    def process_model_output(self, mean_pred, var_pred) -> ScalingResult:
+            
+        Returns:
+        --------
+        np.ndarray
+            The reconstructed sequence
+        """
+        n_features = self.targets.shape[1]
+        time_length = sequence.shape[0]
+        horizon = self.config.horizon
+        
+        reconstructed = np.zeros((time_length + horizon - 1, n_features))
+        counts = np.zeros(time_length + horizon - 1)
+        
+        for i in range(time_length):
+            for h in range(horizon):
+                time_idex = i + h
+                reconstructed[time_idex] += sequence[i, h]
+                counts[time_idex] +=1
+                
+        reconstructed /= counts.reshape(-1, 1)
+        
+        return reconstructed    
+
+    def process_model_output(self, train_mean: Union[np.ndarray, torch.Tensor], 
+                            test_mean: Union[np.ndarray, torch.Tensor],
+                            train_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                            test_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                            ) -> ScalingResult:
         """
         Process the model's output (mean and variance predictions) by rescaling them.
         
         Parameters:
         -----------
-        model_output: Tuple[torch.Tensor, torch.Tensor]
-            The mean and variance predictions from the model
+        train_mean: np.ndarray or torch.Tensor - the training mean output of the model
+        train_var: np.ndarray or torch.Tensor - the training variance output of the model
+        test_mean: np.ndarray or torch.Tensor - the test mean output of the model
+        test_var: np.ndarray or torch.Tensor - the test variance output of the model
             
         Returns:
         --------
@@ -254,12 +300,28 @@ class DataProcessor:
         """
         
         # Convert to numpy for scaling
-        if isinstance(mean_pred, torch.Tensor):
-            mean_pred = mean_pred.detach().numpy()
-        if isinstance(var_pred, torch.Tensor):
-            var_pred = var_pred.detach().numpy()
-        
-        return self.rescale_predictions(mean_pred, var_pred)
+        if isinstance(train_mean, torch.Tensor):
+            train_mean = train_mean.detach().numpy()
+        if isinstance(train_var, torch.Tensor):
+            train_var = train_var.detach().numpy()
+        if isinstance(test_mean, torch.Tensor):
+            test_mean = test_mean.detach().numpy()
+        if isinstance(test_var, torch.Tensor):
+            test_var = test_var.detach().numpy()
+            
+        train_mean = self.reconstruct_sequence(train_mean)
+        print(train_mean.shape) # (time_steps, features)
+        test_mean = self.reconstruct_sequence(test_mean)
+        if train_var is not None:
+            train_var = self.reconstruct_sequence(train_var)
+        if test_var is not None:
+            test_var = self.reconstruct_sequence(test_var)
+            
+        if train_var is not None:
+            return self.rescale_predictions(train_mean, train_var), self.rescale_predictions(test_mean, test_var)
+        else:
+            return self.target_scaler.inverse_transform(train_mean), self.target_scaler.inverse_transform(test_mean)
+
     
 class EarlyStopping:
     def __init__(self, config: TrainingConfig):
@@ -882,7 +944,7 @@ class ModelOptimisation:
                 values = [int(v) for v in values]
                 setattr(self.model_config, name, values)
 
-        simulation_results = self.simulator.run_multiple_simulations()
+        simulation_results, _ = self.simulator.run_multiple_simulations()
         features, targets = self.converter.convert(simulation_results)        
     
         data_processor = self.data_processor(self.train_config)
@@ -904,6 +966,7 @@ class ModelOptimisation:
             average_loss = 1e6
         
         # Apply Monte Carlo prediction if enabled
+        # Can you actually optimise to reduce aleatoric uncertainty?
         if use_monte_carlo:
             mc_predictor = self.monte_carlo(self.model, num_samples=100)
             _, train_var = mc_predictor.predict(X_train.to(self.train_config.device))
@@ -1233,18 +1296,18 @@ def main():
     simulator = CSTRSimulator(CSTR_sim_config)
     # simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
-    simulation_results = simulator.run_multiple_simulations()
+    simulation_results, noiseless_results = simulator.run_multiple_simulations()
     converter = CSTRConverter()
     # converter = BioprocessConverter()
     features, targets = converter.convert(simulation_results)
     
-    data_processor = DataProcessor(training_config)
+    data_processor = DataProcessor(training_config, features, targets)
     # Prepare data
-    # (train_loader, test_loader, X_train, X_test, 
-    #  y_train, y_test) = data_processor.prepare_data(features, targets)
-
     (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
+     y_train, y_test) = data_processor.prepare_data()
+
+    # (train_loader, test_loader, X_train, X_test, 
+    #  y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
     # Initialize model (example with StandardLSTM)
     # model = CNN(
     #     config=CNN_Config,
@@ -1253,12 +1316,15 @@ def main():
     #     var = True
     # )
     quantiles = [0.25, 0.5, 0.75]
-    # model = LSTM(
-    #     config=LSTM_Config,
-    #     input_dim=X_train.shape[2],
-    #     output_dim=y_train.shape[1],
-    #     quantiles = quantiles
-    # )
+    print(y_train.shape)
+    # y_train of shape (time_steps, horizon, features)
+    model = LSTM(
+        config=LSTM_Config,
+        input_dim=X_train.shape[2],
+        output_dim=y_train.shape[2],
+        horizon = training_config.horizon,
+        var = True,
+    )
     # print('X_train shape:', X_train.shape[2])
     # print('outptu_dim:', y_train.shape[1])
     # model = MLP(
@@ -1274,12 +1340,12 @@ def main():
     #     var = True
     # )
     
-    model = MLR(
-        config=MLR_Config,
-        input_dim=X_train.shape[1],
-        output_dim=y_train.shape[1],
-        var = True
-    )
+    # model = MLR(
+    #     config=MLR_Config,
+    #     input_dim=X_train.shape[1],
+    #     output_dim=y_train.shape[1],
+    #     var = True
+    # )
 
     # Train model
     # criterion = nn.MSELoss()
@@ -1308,13 +1374,12 @@ def main():
     # test_pred = inverse_transformer.inverse_transform(test_pred)
     
     
-    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var)
-    train_mean = rescaled_train_pred.mean
-    train_var = rescaled_train_pred.variance
-    
-    rescaled_test_pred = data_processor.process_model_output(test_pred, test_var)
-    test_mean = rescaled_test_pred.mean
-    test_var = rescaled_test_pred.variance
+    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var, test_pred, test_var)
+    train_mean = rescaled_train_pred[0].mean
+    train_var = rescaled_train_pred[0].variance
+
+    test_mean = rescaled_train_pred[1].mean
+    test_var = rescaled_train_pred[1].variance
 
     
     
