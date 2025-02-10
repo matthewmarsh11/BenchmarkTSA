@@ -37,7 +37,7 @@ noiseless_results, _ = converter.convert(noiseless_simulation) # To compare mode
 # Initial model and training configurations
 
 training_config = TrainingConfig(
-    batch_size = 101,
+    batch_size = 30,
     num_epochs = 1000,
     learning_rate = 0.001,
     time_step = 15,
@@ -49,16 +49,6 @@ training_config = TrainingConfig(
     train_test_split = 0.8,
     device = 'cuda' if torch.cuda.is_available() else 'cpu',
 )
-
-model_config = LSTMConfig(
-    hidden_dim = 64,
-    num_layers=4,
-    dropout = 0.2,
-    bidirectional=False,
-    norm_type = None,
-)
-
-# Define bounds for parameters
 
 training_bounds = {
     
@@ -73,40 +63,110 @@ training_bounds = {
         'delta': (1e-6, 0.1),   
 }
 
-# Change these bounds depending on model chosen
-hyperparameter_bounds = {
-        'hidden_dim': (32, 512),
-        'num_layers': (1, 20),
-        'dropout': (0.1, 0.9),
-        'bidirectional': (0, 1),
-        'norm_type': (0, 2),
-    
-}
+LSTM_Config = LSTMConfig(
+    hidden_dim = 64,
+    num_layers=4,
+    dropout = 0.2,
+    bidirectional=False,
+    norm_type = None,
+)
+CNN_Config = CNNConfig(
+    conv_channels = [16, 32],
+    kernel_sizes = [5, 3],
+    fc_dims = [101, 128],
+    dropout = 0.1
+    )
 
-# Combine training and hyperparameter bounds
-bounds = {**training_bounds, **hyperparameter_bounds}
-
-# Define the path you want to save the model to
-path = 'models/CSTR_NLL_LSTM.pth'
-
-# Define the model
-model_class = LSTM
-
-optimiser = ModelOptimisation(
-    model_class= model_class,
-    sim_config = simulation_config,
-    train_config = training_config,
-    model_config = model_config,
-    config_bounds=bounds,
-    simulator = CSTRSimulator,
-    converter = CSTRConverter,
-    data_processor = DataProcessor,
-    trainer_class = ModelTrainer,
-    iters = 300,
-    quantiles = None, # Define how to quantify uncertainty
-    monte_carlo = None,
-    variance = True,
-    
+TF_Config = TFConfig(
+    num_layers = 2,
+    hidden_dim = 64,
+    d_model = 64,
+    num_heads = 4,
+    dim_feedforward = 128,
+    dropout = 0.2,
 )
 
-best_params, best_los  = optimiser.optimise(path)
+MLP_Config = MLPConfig(
+    hidden_dim = 64,
+    num_layers = 4,
+    dropout = 0.2,
+    activation = 'ReLU'
+)
+
+MLR_Config = MLRConfig(
+    dropout = 0.2
+)
+
+LSTM_bounds = {
+    'hidden_dim': (32, 512),
+    'num_layers': (1, 50),
+    'dropout': (0.1, 0.9),
+    'bidirectional': (0, 1),
+    'norm_type': (0, 2),
+}
+
+CNN_bounds = {
+    'conv_channels': [(8, 64), (8, 64)],
+    'kernel_sizes': [(2, 10), (2, 10)],
+    'fc_dims': [(32, 512), (32, 512)],
+    'dropout': (0.1, 0.9),
+}
+
+TF_bounds = {
+    'num_layers': (1, 50),
+    'hidden_dim': (32, 512),
+    'd_model': (32, 512),
+    'num_heads': (1, 8),
+    'dim_feedforward': (32, 512),
+    'dropout': (0.1, 0.9),
+}
+
+MLP_bounds = {
+    'hidden_dim': (32, 512),
+    'num_layers': (1, 50),
+    'dropout': (0.1, 0.9),
+    'activation': (0, 7),  # Assuming 0: ReLU, 1: Tanh, 2: Sigmoid
+}
+
+MLR_bounds = {
+    'dropout': (0.1, 0.9),
+}
+
+# Define bounds for parameters
+
+
+model_dict = {
+    LSTM : (LSTM_Config, {**training_bounds, **LSTM_bounds}),
+    CNN: (CNN_Config, {**training_bounds, **CNN_bounds}),
+    TransformerEncoder: (TF_Config, {**training_bounds, **TF_bounds}),
+    MLP: (MLP_Config, {**training_bounds, **MLP_bounds}),
+    MLR: (MLR_Config, {**training_bounds, **MLR_bounds})
+}
+
+# Iterate through each defined model to optimise
+
+for model, (model_config, bounds) in model_dict.items():
+    print(f"Model: {model}")
+    model_config = model_config
+    bounds = bounds
+
+    # Define the path to save the model to
+    path = f'models/CSTR_NLL_{model}.pth'
+
+    optimiser = ModelOptimisation(
+        model_class= model,
+        sim_config = simulation_config,
+        train_config = training_config,
+        model_config = model_config,
+        config_bounds=bounds,
+        simulator = CSTRSimulator,
+        converter = CSTRConverter,
+        data_processor = DataProcessor,
+        trainer_class = ModelTrainer,
+        iters = 300,
+        quantiles = None, # Define how to quantify uncertainty
+        monte_carlo = None,
+        variance = True,
+        
+    )
+    best_params, best_los  = optimiser.optimise(path)
