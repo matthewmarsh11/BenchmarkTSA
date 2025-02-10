@@ -3,6 +3,7 @@ from pcgym import make_env
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Iterator
 from dataclasses import dataclass
+from tqdm import tqdm
 
 np.random.seed(42)
 
@@ -219,11 +220,10 @@ class CSTRSimulator():
         noisy_results = []
         noiseless_results = []
         
-        for _ in range(self.config.n_simulations):
+        for _ in tqdm(range(self.config.n_simulations), desc="Running simulations"):
             noisy_sim, noiseless_sim = self.simulate()
             noisy_results.append(noisy_sim)
             noiseless_results.append(noiseless_sim)
-        
         return noisy_results, noiseless_results
     
     def plot_results(self, noisy_results: List[SimulationResult], noiseless_results: List[SimulationResult]) -> None:
