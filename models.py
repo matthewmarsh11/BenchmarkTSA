@@ -467,7 +467,7 @@ class BayesianLSTM(nn.Module):
 class CNN(BaseModel):
     """Unified CNN implementation supporting multiple uncertainty estimation methods"""
     def __init__(self, config: CNNConfig, input_dim: int, output_dim: int, 
-                 quantiles: Optional[List[float]] = None, 
+                 horizon: int, quantiles: Optional[List[float]] = None, 
                  monte_carlo: Optional[bool] = False, 
                  var: Optional[bool] = False):
         """Initialize CNN model with various uncertainty estimation capabilities
@@ -476,6 +476,7 @@ class CNN(BaseModel):
             config: CNNConfig object containing model parameters
             input_dim: Input dimension
             output_dim: Output dimension
+            horizon: Number of time steps to predict
             quantiles: List of quantiles for quantile regression
             monte_carlo: Whether to use Monte Carlo dropout
             var: Whether to estimate variance (for NLL loss)
@@ -483,6 +484,8 @@ class CNN(BaseModel):
         super().__init__(config)
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.horizon = horizon
+        
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
         self.var = var
@@ -535,9 +538,9 @@ class CNN(BaseModel):
             fc_input_dim = fc_dim
         
         # Output layers
-        self.fc = nn.Linear(fc_input_dim, self.output_dim)
+        self.fc = nn.Linear(fc_input_dim, self.output_dim * self.horizon)
         if self.var:
-            self.fc_logvar = nn.Linear(fc_input_dim, output_dim)
+            self.fc_logvar = nn.Linear(fc_input_dim, self.output_dim * self.horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Reshape input for CNN: [batch_size, features, time_step]
@@ -558,14 +561,21 @@ class CNN(BaseModel):
         if self.var:
             # Return mean and variance for NLL loss
             var = torch.exp(self.fc_logvar(x))
-            return self.fc(x), var
+            out = self.fc(x)
+            return out.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
             
         if self.quantiles is not None:
             # Return reshaped output for quantile regression
-            return self.fc(x).view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
-            
+            out = self.fc(x)
+            return x.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        if self.monte_carlo:
+            x = nn.Dropout(p=self.config.dropout)(x)
+            out = self.fc(x)
+            return out.view(-1, self.horizon, self.output_dim)
+        
         # Standard or Monte Carlo dropout output
-        return self.fc(x)
+        return self.fc(x).view(-1, self.horizon, self.output_dim)
 
 class StandardCNN(BaseModel):
     """ Standard CNN Implementation """
