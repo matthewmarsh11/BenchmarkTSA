@@ -155,7 +155,7 @@ class DataProcessor:
     def prepare_sequences(self, scaled_features, scaled_targets) -> Tuple[np.ndarray, np.ndarray]:
         """Create sequences for time series prediction"""
         X, y = [], []
-        for i in range(len(scaled_features) - self.config.time_step - self.config.horizon + 1):
+        for i in range(len(scaled_features) - self.config.time_step - self.config.horizon):
             # Input sequence remains the same
             X.append(scaled_features[i:i + self.config.time_step])
             
@@ -190,33 +190,7 @@ class DataProcessor:
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
         test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
 
-        return train_loader, test_loader, X_train, X_test, y_train, y_test
-    
-    def prepare_data_ANNs(self) -> Tuple[DataLoader, DataLoader, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prepare data for training"""
-        # Scale data
-        X = self.feature_scaler.fit_transform(self.features)
-        y = self.target_scaler.fit_transform(self.targets)
-
-        # Convert to tensors, cannot handle sequences like RNNs or CNNs
-        X_tensor = torch.FloatTensor(X)
-        y_tensor = torch.FloatTensor(y)
-
-        # Split data
-        split_idx = int(len(X_tensor) * self.config.train_test_split)
-        X_train = X_tensor[:split_idx]
-        X_test = X_tensor[split_idx:]
-        y_train = y_tensor[:split_idx]
-        y_test = y_tensor[split_idx:]
-
-        # Create dataloaders
-        train_dataset = TensorDataset(X_train, y_train)
-        test_dataset = TensorDataset(X_test, y_test)
-
-        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
-        
-        return train_loader, test_loader, X_train, X_test, y_train, y_test
+        return train_loader, test_loader, X_train, X_test, y_train, y_test, X_tensor, y_tensor
 
     def rescale_predictions(self, scaled_mean: np.ndarray, scaled_variance: np.ndarray) -> ScalingResult:
         """
@@ -235,50 +209,69 @@ class DataProcessor:
             Named tuple containing rescaled mean and variance
         """
         # Get the scale factors from the target scaler
+        
+        if isinstance(scaled_mean, torch.Tensor):
+            scaled_mean = scaled_mean.detach().numpy()
+        if isinstance(scaled_variance, torch.Tensor):
+            scaled_variance = scaled_variance.detach().numpy()
+        
         scale_factor = self.target_scaler.data_max_ - self.target_scaler.data_min_
+
         
-        # Rescale the mean predictions
         rescaled_mean = self.target_scaler.inverse_transform(scaled_mean)
-    
         rescaled_variance = np.multiply(scaled_variance, (scale_factor ** 2))
-        
+
         return ScalingResult(rescaled_mean, rescaled_variance)
     
-    def reconstruct_sequence(self, sequence: np.ndarray) -> np.ndarray:
-        """
-        Reconstruct the sequence to its original form by reshaping it.
+    def rescale_means(self, scaled_mean: np.ndarray) -> np.ndarray:
         
+        if isinstance(scaled_mean, torch.Tensor):
+            scaled_mean = scaled_mean.detach().numpy()
+        
+        rescaled_mean = np.zeros_like(scaled_mean)
+        # Rescale the mean predictions
+        for i in range(scaled_mean.shape[1]):
+            rescaled_mean[:, i, :] = self.target_scaler.inverse_transform(scaled_mean[:, i, :])
+
+        return rescaled_mean
+    
+    def reconstruct_sequence(self, sequence: np.ndarray, train_data: bool) -> np.ndarray:
+        """
+        Reconstruct the time series by averaging overlapping sequences.
+
         Parameters:
         -----------
         sequence: np.ndarray
-            The sequence to reconstruct
-        horizon: int
-            The prediction horizon
-
-            
+            The sequence to reconstruct (shape: [num_sequences, time_horizon, num_features])
+        train_data: bool
+            Whether the sequence is training data or not
         Returns:
         --------
         np.ndarray
-            The reconstructed sequence
+            The reconstructed time series (shape: [n_time_steps, num_features])
         """
-        n_features = self.targets.shape[1]
-        time_length = sequence.shape[0]
-        horizon = self.config.horizon
-        
-        reconstructed = np.zeros((time_length + horizon - 1, n_features))
-        counts = np.zeros(time_length + horizon - 1)
-        
-        for i in range(time_length):
-            for h in range(horizon):
-                time_idex = i + h
-                reconstructed[time_idex] += sequence[i, h]
-                counts[time_idex] +=1
-                
-        reconstructed /= counts.reshape(-1, 1)
-        
-        return reconstructed    
+        num_sequences, time_horizon, num_features = sequence.shape
+        n_time_steps = self.targets.shape[0]
+        # if train_data:
+        #     n_time_steps = int(num_sequences + self.config.train_test_split*(time_horizon + self.config.time_step))
+        # else:
+        #     n_time_steps = int(num_sequences + (1-self.config.train_test_split) * (time_horizon + self.config.time_step))
+        # # Accumulators for sum and counts
+        reconstructed = np.zeros((n_time_steps, num_features))
+        count = np.zeros((n_time_steps, 1))
 
-    def process_model_output(self, train_mean: Union[np.ndarray, torch.Tensor], 
+        for i in range(num_sequences - 1):
+            for h in range(time_horizon):
+                t_index = i + h  # The actual time index in the full sequence
+                reconstructed[t_index] += sequence[i, h]
+                count[t_index] += 1
+
+        # Avoid division by zero
+        count[count == 0] = 1  
+
+        return reconstructed / count
+
+    def revert_sequences(self, train_mean: Union[np.ndarray, torch.Tensor], 
                             test_mean: Union[np.ndarray, torch.Tensor],
                             train_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
                             test_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
@@ -290,8 +283,8 @@ class DataProcessor:
         -----------
         train_mean: np.ndarray or torch.Tensor - the training mean output of the model
         train_var: np.ndarray or torch.Tensor - the training variance output of the model
-        test_mean: np.ndarray or torch.Tensor - the test mean output of the model
-        test_var: np.ndarray or torch.Tensor - the test variance output of the model
+        test_mean: Optional: np.ndarray or torch.Tensor - the test mean output of the model
+        test_var: Optional: np.ndarray or torch.Tensor - the test variance output of the model
             
         Returns:
         --------
@@ -308,21 +301,35 @@ class DataProcessor:
             test_mean = test_mean.detach().numpy()
         if isinstance(test_var, torch.Tensor):
             test_var = test_var.detach().numpy()
-            
-        train_mean = self.reconstruct_sequence(train_mean)
-        print(train_mean.shape) # (time_steps, features)
-        test_mean = self.reconstruct_sequence(test_mean)
+        
+        # Reconstruct the sequences into (time steps, observed preds, features)
+        # The prediction only begins after the first sequence, so clip the last values
+        train_mean = self.reconstruct_sequence(train_mean, True)
+        train_mean = train_mean[:-(self.config.time_step - 1)]
+        test_mean = self.reconstruct_sequence(test_mean, False)
+        test_mean = test_mean[:-(self.config.time_step - 1)]
+        # Do it for the variance too
         if train_var is not None:
-            train_var = self.reconstruct_sequence(train_var)
+            train_var = self.reconstruct_sequence(train_var, True)
+            train_var = train_var[:-(self.config.time_step - 1)]
+            print("train", train_var.shape)
         if test_var is not None:
-            test_var = self.reconstruct_sequence(test_var)
-            
-        if train_var is not None:
-            return self.rescale_predictions(train_mean, train_var), self.rescale_predictions(test_mean, test_var)
+            test_var = self.reconstruct_sequence(test_var, False)
+            test_var = test_var[:-(self.config.time_step - 1)]
+            print("test", test_var.shape)
+        
+        means = np.concatenate([train_mean, test_mean], axis=0)
+        if train_var is not None and test_var is not None:
+            vars = np.concatenate([train_var, test_var], axis=0)
+            return self.rescale_predictions(means, vars)
         else:
-            return self.target_scaler.inverse_transform(train_mean), self.target_scaler.inverse_transform(test_mean)
-
-    
+            return self.rescale_means(means)
+        
+        # if train_var is not None:
+        #     return self.rescale_predictions(train_mean, train_var), self.rescale_predictions(test_mean, test_var)
+        # else:
+        #     return self.rescale_means(train_mean), self.rescale_means(test_mean)
+ 
 class EarlyStopping:
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -465,13 +472,51 @@ class ModelTrainer:
 
 class Visualizer:
     """Handles visualization of results."""
+    @staticmethod
+    def plot_preds(preds: Union[np.ndarray, Dict[float, np.ndarray]],    
+                         noisy_data, noiseless_data: np.ndarray, sequence_length: int,
+                         time_horizon: int, feature_names: list, num_simulations: int, 
+                         train_test_split: float,
+                         vars: Optional[np.ndarray] = None):
+        split_idx = int(train_test_split * len(preds))
+        
+        feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
+
+        for i, sim in enumerate(feature_names):
+            plt.figure(figsize=(10, 6))
+            
+            
+            # Plot training predictions and ground truth
+            plt.plot(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
+                preds[:split_idx, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
+            test_offset = sequence_length + len(preds[:split_idx, i])
+            plt.plot(range(test_offset, test_offset + len(preds[split_idx:, i])), 
+                    preds[split_idx:, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
+            
+            plt.plot(noisy_data[:, i], label=f'{sim} Noisy Simulation', color='green', alpha=0.7)
+            plt.plot(noiseless_data[:, i], label=f'{sim} Noiseless Data', color='black', linestyle = 'dashed', alpha=0.7)
+            
+            plt.title(f'{sim} Predictions')
+            plt.xlabel('Time Step')
+            plt.ylabel(sim)
+            plt.legend(loc='upper left', bbox_to_anchor=(1.05, 1), ncol=1)
+            
+            if vars is not None:
+                plt.fill_between(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
+                                preds[:split_idx, i] - np.sqrt(vars[:split_idx, i]), preds[:split_idx, i] + np.sqrt(vars[:split_idx, i]),
+                                color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
+                plt.fill_between(range(test_offset, test_offset + len(preds[split_idx:, i])),
+                                preds[split_idx:, i] - np.sqrt(vars[split_idx:, i]), preds[split_idx:, i] + np.sqrt(vars[split_idx:, i]),
+                                color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
+            plt.tight_layout()
+            plt.show()   
     
     @staticmethod
-    def plot_predictions(train_pred: Union[np.ndarray, Dict[float, np.ndarray]], 
-                         test_pred: Union[np.ndarray, Dict[float, np.ndarray]],
-                         noisy_data, noiseless_data: np.ndarray,
-                         feature_names: list, num_simulations: int, sequence_length: int,
-                         train_var: Optional[np.ndarray] = None, test_var: Optional[np.ndarray] = None):
+    def plot_predictions(preds: Union[np.ndarray, Dict[float, np.ndarray]],    
+                         noisy_data, noiseless_data: np.ndarray, sequence_length: int,
+                         time_horizon: int, feature_names: list, num_simulations: int, 
+                         train_test_split: float,
+                         vars: Optional[np.ndarray] = None):
         """
         Plots predictions and ground truth data.
         
@@ -482,12 +527,30 @@ class Visualizer:
             noiseless_data (np.ndarray): Simulation without the noise (time steps, features).
             feature_names (list): List of feature names, one per column in the data.
             sequence_length (int): Length of the sequence.
+            time_horizon (int): Time horizon for the predictions.
             num_simulations (int): Number of simulations in the data.
         """
+        # Resplit back into train and test data.
+        if isinstance(preds, np.ndarray):
+            train_pred = preds[:int(train_test_split * len(preds))]
+            test_pred = preds[int(train_test_split * len(preds)):]
         
+        train_var = vars[:int(train_test_split * len(vars))] if vars is not None else None
+        test_var = vars[int(train_test_split * len(vars)):] if vars is not None else None
+                        
         feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
         train_pred_new = None
-        if isinstance(train_pred, dict):
+        
+        if isinstance(preds, dict):
+            # Create empty dictionaries for training and testing predictions
+            train_pred = {}
+            test_pred = {}
+
+            # Iterate through each quantile key and split the predictions
+            split_idx = int(train_test_split * len(preds[0.5]))
+            for key in preds.keys():
+                train_pred[key] = preds[key][:split_idx]
+                test_pred[key] = preds[key][split_idx:]
             train_pred_new = train_pred
             test_pred_new = test_pred
             train_pred = train_pred[0.5]
@@ -502,8 +565,9 @@ class Visualizer:
             
             
             # Plot testing predictions and ground truth
-            offset = len(train_pred)
-            plt.plot(range(sequence_length + offset, sequence_length + offset + len(test_pred)), 
+            offset = len(train_pred) + sequence_length + 2 - time_horizon
+            test_offset = len(noisy_data) - len(test_pred)
+            plt.plot(range(test_offset,  test_offset + len(test_pred)), 
                     test_pred[:, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
             
             plt.plot(noisy_data[:, i], label=f'{sim} Noisy Simulation', color='green', alpha=0.7)
@@ -512,7 +576,7 @@ class Visualizer:
             plt.title(f'{sim} Predictions')
             plt.xlabel('Time Step')
             plt.ylabel(sim)
-            plt.legend(loc='upper right', bbox_to_anchor=(1.05, 1), ncol=1)
+            plt.legend(loc='upper left', bbox_to_anchor=(1.05, 1), ncol=1)
             
             if train_pred_new:
                 keys = train_pred_new.keys()
@@ -522,7 +586,7 @@ class Visualizer:
                                  train_pred_new[min_key][:, i], train_pred_new[max_key][:, i], color='blue', 
                                  alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
                 
-                plt.fill_between(range(sequence_length + offset, sequence_length + offset + len(test_pred)), 
+                plt.fill_between(range(test_offset,  test_offset + len(test_pred)), 
                                  test_pred_new[min_key][:, i], test_pred_new[max_key][:, i], color='red', 
                                  alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
             
@@ -531,7 +595,7 @@ class Visualizer:
                                 train_pred[:, i] - np.sqrt(train_var[:, i]), train_pred[:, i] + np.sqrt(train_var[:, i]),
                                 color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
             if test_var is not None:
-                plt.fill_between(range(sequence_length + offset, sequence_length + offset + len(test_pred)),
+                plt.fill_between(range(test_offset,  test_offset + len(test_pred)),
                                  test_pred[:, i] - np.sqrt(test_var[:, i]), test_pred[:, i] + np.sqrt(test_var[:, i]),
                                  color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
                 
@@ -868,13 +932,15 @@ class ModelOptimisation:
             model_kwargs = {
                 'config': self.model_config,
                 'input_dim': X_train.shape[1],
-                'output_dim': y_train.shape[1]
+                'output_dim': y_train.shape[1],
+                'horizon': self.train_config.horizon
             }
         else:
             model_kwargs = {
                 'config': self.model_config,
-                'input_dim': X_train.shape[2],
-                'output_dim': y_train.shape[1]
+                'input_dim': X_train.shape[1]*X_train.shape[2],
+                'output_dim': y_train.shape[2],
+                'horizon': self.train_config.horizon
             }
             
         # Start with base configuration
@@ -946,14 +1012,13 @@ class ModelOptimisation:
 
         simulation_results, _ = self.simulator.run_multiple_simulations()
         features, targets = self.converter.convert(simulation_results)        
-    
-        data_processor = self.data_processor(self.train_config)
+        data_processor = self.data_processor(self.train_config, features, targets)
         if self.model_class == MLP:
             (train_loader, test_loader, X_train, X_test,
-            y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
+            y_train, y_test, X, y) = data_processor.prepare_data_ANNs()
         else:    
             (train_loader, test_loader, X_train, X_test,
-            y_train, y_test) = data_processor.prepare_data(features, targets)
+            y_train, y_test, X, y) = data_processor.prepare_data()
         
             
         self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion(X_train, y_train)
@@ -1247,12 +1312,14 @@ def main():
     # Configurations
     CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
+    
+    
     training_config = TrainingConfig(
         batch_size=48,
         num_epochs=20,
         learning_rate=0.0031,
-        time_step=36,
-        horizon=7,
+        time_step=10,
+        horizon=5,
         weight_decay=0.01,
         factor=0.1,
         patience=58,
@@ -1260,7 +1327,7 @@ def main():
     )
     LSTM_Config = LSTMConfig(
         hidden_dim = 64,
-        num_layers=2,
+        num_layers=4,
         dropout = 0.2,
         bidirectional=False,
         norm_type = None,
@@ -1283,7 +1350,7 @@ def main():
     
     MLP_Config = MLPConfig(
         hidden_dim = 64,
-        num_layers = 2,
+        num_layers = 4,
         dropout = 0.2,
         activation = 'ReLU'
     )
@@ -1296,15 +1363,16 @@ def main():
     simulator = CSTRSimulator(CSTR_sim_config)
     # simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
-    simulation_results, noiseless_results = simulator.run_multiple_simulations()
+    simulation_results, noiseless_sim = simulator.run_multiple_simulations()
     converter = CSTRConverter()
     # converter = BioprocessConverter()
     features, targets = converter.convert(simulation_results)
+    noiseless_results, _ = converter.convert(noiseless_sim)
     
     data_processor = DataProcessor(training_config, features, targets)
     # Prepare data
     (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test) = data_processor.prepare_data()
+     y_train, y_test, X, y) = data_processor.prepare_data()
 
     # (train_loader, test_loader, X_train, X_test, 
     #  y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
@@ -1316,7 +1384,7 @@ def main():
     #     var = True
     # )
     quantiles = [0.25, 0.5, 0.75]
-    print(y_train.shape)
+
     # y_train of shape (time_steps, horizon, features)
     model = LSTM(
         config=LSTM_Config,
@@ -1325,13 +1393,15 @@ def main():
         horizon = training_config.horizon,
         var = True,
     )
+    
     # print('X_train shape:', X_train.shape[2])
     # print('outptu_dim:', y_train.shape[1])
     # model = MLP(
     #     config = MLP_Config,
-    #     input_dim=X_train.shape[1],
-    #     output_dim=y_train.shape[1],
-    #     quantiles = quantiles
+    #     input_dim=X_train.shape[1]*X_train.shape[2],
+    #     output_dim=y_train.shape[2], 
+    #     horizon = training_config.horizon,
+    #     var = True
     # )
     # model = TransformerEncoder(
     #     config=TF_Config,
@@ -1373,18 +1443,14 @@ def main():
     # train_pred = inverse_transformer.inverse_transform(train_pred)
     # test_pred = inverse_transformer.inverse_transform(test_pred)
     
+    rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
+    means = rescaled_pred[0]
+    variances = rescaled_pred[1]
+    print(means.shape)
     
-    rescaled_train_pred = data_processor.process_model_output(train_pred, train_var, test_pred, test_var)
-    train_mean = rescaled_train_pred[0].mean
-    train_var = rescaled_train_pred[0].variance
-
-    test_mean = rescaled_train_pred[1].mean
-    test_var = rescaled_train_pred[1].variance
-
-    
-    
-    y_train_orig = data_processor.target_scaler.inverse_transform(y_train)
-    y_test_orig = data_processor.target_scaler.inverse_transform(y_test)
+    # rescaled_actual = data_processor.revert_sequences(y_train, y_test)
+    # y_train_orig = rescaled_actual[0]
+    # y_test_orig = rescaled_actual[1]
     
     # mc_predictor = MC_Prediction(model, num_samples=100)
     # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
@@ -1400,16 +1466,18 @@ def main():
     feature_names = ['conc', 'temp']
     action_names = ['inlet temp', 'feed conc', 'coolant temp']
     visualizer = Visualizer()
-    visualizer.plot_predictions(train_mean, test_mean, y_train_orig, y_test_orig, 
-                                feature_names, CSTR_sim_config.n_simulations, 
-                                num_plots = 5, train_var=train_var, test_var=test_var)
+    sequence_length = training_config.time_step
+    visualizer.plot_predictions(means, features, noiseless_results,
+                                sequence_length=sequence_length, time_horizon=training_config.horizon, 
+                                feature_names = feature_names, num_simulations=10, train_test_split=training_config.train_test_split,
+                                vars=variances)
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
     actions = features[:, -int(features.shape[1] - targets.shape[1]):]
     # print(actions.shape)
     # visualizer.plot_actions(actions, action_names, num_simulations = 10)
-    model_class = MLR
+    model_class = LSTM
     trainer_class = ModelTrainer
     
     CNN_config_bounds = {
@@ -1431,7 +1499,7 @@ def main():
         'dropout': (0.0, 0.9)                    # Full range of dropout values
     }
     
-    LSTM_config_bounds = {
+    LSTM_ConfigBounds = {
         # Training config bounds
         'batch_size': (2, 50) if isinstance(simulator, CSTRSimulator) else (2, 10),
         'num_epochs': (50, 500),
@@ -1506,8 +1574,8 @@ def main():
     }
         
     
-    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, MLR_Config,
-                                  config_bounds=MLR_ConfigBounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
+                                  config_bounds=LSTM_ConfigBounds, simulator=CSTRSimulator, converter=CSTRConverter, 
                                   data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, variance=True)
     path = 'best_model.pth'
     best_params, best_loss = optimizer.optimise(path)
