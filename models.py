@@ -928,40 +928,43 @@ class QuantileMLP(BaseModel):
 class MLR(BaseModel):
     """Multi Linear Regression Model"""
     def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int, 
-                 quantiles: Optional[List[float]] = None, 
+                 horizon: int, quantiles: Optional[List[float]] = None, 
                  monte_carlo: Optional[bool] = False, 
                  var: Optional[bool] = False):
         
         super().__init__(config)
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.horizon = horizon
         
         self.quantiles = quantiles
         self.var = var
         self.monte_carlo = monte_carlo
         
         if self.quantiles is not None:
-            self.output_dim = output_dim * len(quantiles)
+            self.output_dim = output_dim * len(self.quantiles)
         
         if self.var:
-            self.logvar = nn.Linear(self.input_dim, self.output_dim)
+            self.logvar = nn.Linear(self.input_dim, self.output_dim * self.horizon)
         
         
-        self.fc = nn.Linear(self.input_dim, self.output_dim)
+        self.fc = nn.Linear(self.input_dim, self.output_dim * self.horizon)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Reshape to deal with batching
+        x = x.view(x.size(0), -1) # Flattens to shape of (batch, horizon)
         out = self.fc(x)
         
         if self.var:
             var = torch.exp(self.logvar(x))
-            return out, var
+            return out.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
         
         if self.quantiles is not None:
-            return out.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            return out.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
         
         if self.monte_carlo:
             out = nn.Dropout(p=self.config.dropout)(out)
-            return out
+            return out.view(-1, self.horizon, self.output_dim)
         
         return out
     
