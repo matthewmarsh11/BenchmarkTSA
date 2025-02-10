@@ -790,15 +790,16 @@ activations = ["ReLU", "Softplus", "Tanh", "SELU", "LeakyReLU", "Sigmoid", "Soft
 class MLP(BaseModel):
     """Unified MLP implementation supporting multiple uncertainty estimation methods"""
     def __init__(self, config: MLPConfig, input_dim: int, output_dim: int,
-                 quantiles: Optional[List[float]] = None,
+                 horizon: int, quantiles: Optional[List[float]] = None,
                  monte_carlo: Optional[bool] = False,
                  var: Optional[bool] = False):
         """Initialize MLP model with various uncertainty estimation capabilities
         
         Args:
             config: MLPConfig object containing model parameters
-            input_dim: Input dimension
+            input_dim: Input dimension: Number of features x time horizon
             output_dim: Output dimension
+            horizon: Prediction horizon
             quantiles: List of quantiles for quantile regression
             monte_carlo: Whether to use Monte Carlo dropout
             var: Whether to estimate variance (for NLL loss)
@@ -806,6 +807,7 @@ class MLP(BaseModel):
         super().__init__(config)
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.horizon = horizon
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
         self.var = var
@@ -848,22 +850,33 @@ class MLP(BaseModel):
         self.layers = nn.Sequential(*layers)
         
         # Output layers
-        self.fc = nn.Linear(current_dim, self.output_dim)
+        self.fc = nn.Linear(current_dim, self.output_dim * self.horizon)
         if self.var:
-            self.fc_logvar = nn.Linear(current_dim, self.output_dim)
+            self.fc_logvar = nn.Linear(current_dim, self.output_dim * self.horizon)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Reshape to deal with batching
+        x = x.view(x.size(0), -1) # Flattens to shape of (batch, horizon)
         x = self.layers(x)
         
         if self.var:
             # Return mean and variance for NLL loss
             var = torch.exp(self.fc_logvar(x))
-            return self.fc(x), var
+            x = self.fc(x)
             
+            return x.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
+        
+        if self.monte_carlo: # Dropout from the output
+        # Pass the output 
+            x = nn.Dropout(p=self.config.dropout)(x)
+            out = self.fc(x)
+            # shape of out is [batch_size, output_dim], reshape to [batch, horizon, features]
+            return out.view(-1, self.horizon, self.output_dim)
+        
         if self.quantiles is not None:
             gramah = self.fc(x)
             # Return reshaped output for quantile regression
-            return self.fc(x).view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            return x.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
             
         # Standard or Monte Carlo dropout output
         return self.fc(x)
@@ -951,7 +964,6 @@ class MLR(BaseModel):
             return out
         
         return out
-        
     
 # Transformers
 class PositionalEncoding(nn.Module):
@@ -978,12 +990,13 @@ class PositionalEncoding(nn.Module):
 # Encoder Only Model
 class TransformerEncoder(BaseModel):
     def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int,
-                 quantiles: Optional[List[float]] = None, 
+                 horizon: int, quantiles: Optional[List[float]] = None, 
                  monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
         super().__init__(config)
         self.config = config
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.horizon = horizon
         
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
@@ -1014,7 +1027,7 @@ class TransformerEncoder(BaseModel):
             nn.Linear(self.config.d_model, self.config.dim_feedforward),
             nn.ReLU(),
             nn.Dropout(self.config.dropout),
-            nn.Linear(self.config.dim_feedforward, self.output_dim)
+            nn.Linear(self.config.dim_feedforward, self.output_dim * self.horizon)
         )
         
         if self.var:            
@@ -1023,7 +1036,7 @@ class TransformerEncoder(BaseModel):
                 nn.Linear(self.config.d_model, self.config.dim_feedforward),
                 nn.ReLU(),
                 nn.Dropout(self.config.dropout),
-                nn.Linear(self.config.dim_feedforward, self.output_dim)
+                nn.Linear(self.config.dim_feedforward, self.output_dim * self.horizon)
             )
 
     def forward(self, x):
@@ -1045,16 +1058,17 @@ class TransformerEncoder(BaseModel):
         
         if self.var:
             var = torch.exp(self.fc_logvar(output_seq))
-            return output, var
+            return output.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
         
         if self.monte_carlo:
             output = nn.Dropout(p=self.config.dropout)(output_seq)
-            return self.output_layer(output)
+            output_final = self.output_layer(output)
+            return output_final.view(-1, self.horizon, self.output_dim)
         
         if self.quantiles is not None:
-            return output.view(-1, self.output_dim // len(self.quantiles), len(self.quantiles))
+            return output.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
         
-        return output
+        return output.view(-1, self.horizon, self.output_dim)
         
 # Graph Neural Networks (GNNs)
 
