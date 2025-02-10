@@ -931,14 +931,14 @@ class ModelOptimisation:
         if self.model_class == MLP or self.model_class == MLR:
             model_kwargs = {
                 'config': self.model_config,
-                'input_dim': X_train.shape[1],
+                'input_dim': X_train.shape[1] * X_train.shape[2],
                 'output_dim': y_train.shape[1],
                 'horizon': self.train_config.horizon
             }
         else:
             model_kwargs = {
                 'config': self.model_config,
-                'input_dim': X_train.shape[1]*X_train.shape[2],
+                'input_dim': X_train.shape[2],
                 'output_dim': y_train.shape[2],
                 'horizon': self.train_config.horizon
             }
