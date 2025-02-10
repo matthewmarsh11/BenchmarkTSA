@@ -19,7 +19,7 @@ np.random.seed(42)
 # Create simulation
 
 simulation_config = SimulationConfig(
-    n_simulations=100,
+    n_simulations=10000,
     T = 100, # Change the number of time steps
     tsim = 500,
     noise_percentage = 0.01
@@ -106,10 +106,11 @@ LSTM_bounds = {
 }
 
 CNN_bounds = {
-    'conv_channels': [(8, 64), (8, 64)],
-    'kernel_sizes': [(2, 10), (2, 10)],
-    'fc_dims': [(32, 512), (32, 512)],
-    'dropout': (0.1, 0.9),
+    'conv_channels': [(4, 512), (8, 1024)],   # Allowing very small and extremely large channel sizes
+    'kernel_sizes': [(1, 15), (1, 11)],       # Very small (1) to very large (15) receptive fields
+    'fc_dims': [(16, 2048), (32, 4096)],      # Fully connected layers from tiny to massive
+    'dropout': (0.0, 0.9),                    # Almost full range of dropout (up to extreme regularization)
+    'norm_type' : (0, 2),                       # No normalization, batch normalization, layer normalization'
 }
 
 TF_bounds = {
