@@ -272,7 +272,7 @@ class DataProcessor:
         return reconstructed / count
 
     def revert_sequences(self, train_mean: Union[np.ndarray, torch.Tensor], 
-                            test_mean: Union[np.ndarray, torch.Tensor],
+                            test_mean: Optional[Union[np.ndarray, torch.Tensor]] = None,
                             train_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
                             test_var: Optional[Union[np.ndarray, torch.Tensor]] = None,
                             ) -> ScalingResult:
@@ -282,7 +282,7 @@ class DataProcessor:
         Parameters:
         -----------
         train_mean: np.ndarray or torch.Tensor - the training mean output of the model
-        train_var: np.ndarray or torch.Tensor - the training variance output of the model
+        train_var: Optional: np.ndarray or torch.Tensor - the test variance output of the model
         test_mean: Optional: np.ndarray or torch.Tensor - the test mean output of the model
         test_var: Optional: np.ndarray or torch.Tensor - the test variance output of the model
             
@@ -306,17 +306,19 @@ class DataProcessor:
         # The prediction only begins after the first sequence, so clip the last values
         train_mean = self.reconstruct_sequence(train_mean, True)
         train_mean = train_mean[:-(self.config.time_step - 1)]
-        test_mean = self.reconstruct_sequence(test_mean, False)
-        test_mean = test_mean[:-(self.config.time_step - 1)]
+        if test_mean is not None:
+            test_mean = self.reconstruct_sequence(test_mean, False)
+            test_mean = test_mean[:-(self.config.time_step - 1)]
         # Do it for the variance too
         if train_var is not None:
             train_var = self.reconstruct_sequence(train_var, True)
             train_var = train_var[:-(self.config.time_step - 1)]
-            print("train", train_var.shape)
         if test_var is not None:
             test_var = self.reconstruct_sequence(test_var, False)
             test_var = test_var[:-(self.config.time_step - 1)]
-            print("test", test_var.shape)
+
+        if test_var is None:
+            return self.target_scaler.inverse_transform(train_mean)
         
         means = np.concatenate([train_mean, test_mean], axis=0)
         if train_var is not None and test_var is not None:
@@ -329,6 +331,30 @@ class DataProcessor:
         #     return self.rescale_predictions(train_mean, train_var), self.rescale_predictions(test_mean, test_var)
         # else:
         #     return self.rescale_means(train_mean), self.rescale_means(test_mean)
+        
+    def quantile_invert(self, preds, quantiles):
+        """
+        Inverse transform the predictions from quantile space to original space.
+
+        Args:
+            preds (np.ndarray): Predictions of shape (batch_size, features * quantiles)
+
+        Returns:
+            np.ndarray: Predictions in original space of shape (batch_size, features)
+        """
+
+        # Initialize list to store inverse transformed predictions
+        quantile_preds = {}
+        # Inverse transform each quantile prediction
+        for i, q in enumerate(quantiles):
+            pred_q = preds[:, :, :, i]
+            # This is a prediction of shape (no_sequences, horizon, features)
+            # Reconstruct the sequences
+            pred_q = self.revert_sequences(pred_q)
+            quantile_preds[q] = pred_q # Shape: {quantile: (time_steps, features)}
+        
+        # Stack the predictions along the last axis
+        return quantile_preds
  
 class EarlyStopping:
     def __init__(self, config: TrainingConfig):
@@ -478,9 +504,27 @@ class Visualizer:
                          time_horizon: int, feature_names: list, num_simulations: int, 
                          train_test_split: float,
                          vars: Optional[np.ndarray] = None):
-        split_idx = int(train_test_split * len(preds))
+        
+        # If split the predictions into the train set and test set
+        # If it is a dictionary (quantiles) need to account for this
+        if isinstance(preds, np.ndarray):
+            split_idx = int(train_test_split * len(preds))
+        else:
+            split_idx = int(train_test_split * len(preds[0.5]))
+        
+        pred_new = None
         
         feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
+
+        # Now have to deal with the case where the predictions are quantiles (dictionary)
+        
+        if isinstance(preds, dict):
+            # Iterate through each quantile key and split the predictions
+            split_idx = int(train_test_split * len(preds[0.5]))
+
+            pred_new = preds
+            preds = preds[0.5]
+
 
         for i, sim in enumerate(feature_names):
             plt.figure(figsize=(10, 6))
@@ -508,6 +552,17 @@ class Visualizer:
                 plt.fill_between(range(test_offset, test_offset + len(preds[split_idx:, i])),
                                 preds[split_idx:, i] - np.sqrt(vars[split_idx:, i]), preds[split_idx:, i] + np.sqrt(vars[split_idx:, i]),
                                 color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
+
+            # Plot the dictionary of quantiles as the uncertainty
+            if pred_new:
+                keys = pred_new.keys()
+                max_key = max(keys)
+                min_key = min(keys)
+                plt.fill_between(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
+                                pred_new[min_key][:split_idx, i], pred_new[max_key][:split_idx, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
+                plt.fill_between(range(test_offset, test_offset + len(preds[split_idx:, i])), 
+                                pred_new[min_key][split_idx:, i], pred_new[max_key][split_idx:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
+           
             plt.tight_layout()
             plt.show()   
     
@@ -711,8 +766,9 @@ class QuantileLoss(nn.Module):
             torch.Tensor: The mean quantile loss.
         """
         # Reshape predictions to (batch_size, features, quantiles)
-        num_features = target.size(1)
-        preds = preds.view(-1, num_features, len(self.quantiles))
+        num_features = target.size(2)
+        horizon = target.size(1)
+        preds = preds.view(-1, horizon, num_features, len(self.quantiles))
 
         assert not target.requires_grad
         assert preds.size(0) == target.size(0), "Batch size mismatch between preds and target"
@@ -724,7 +780,7 @@ class QuantileLoss(nn.Module):
         # Compute loss for each quantile
         for i, q in enumerate(self.quantiles):
             # Select the predictions for the i-th quantile
-            pred_q = preds[:, :, i]  # Shape: (batch_size, features)
+            pred_q = preds[:, :, :, i]  # Shape: (batch_size, features)
 
             # Compute the error (difference) between target and predicted quantile
             errors = target - pred_q
@@ -738,35 +794,6 @@ class QuantileLoss(nn.Module):
         # Mean loss across all quantiles
         total_loss = torch.stack(losses).mean()
         return total_loss
-
-class QuantileTransform:
-    def __init__(self, quantiles: List[float], scaler):
-        
-        self.quantiles = quantiles
-        self.num_quantiles = len(quantiles)
-        self.scaler = scaler
-        
-    def inverse_transform(self, preds):
-        """
-        Inverse transform the predictions from quantile space to original space.
-
-        Args:
-            preds (np.ndarray): Predictions of shape (batch_size, features * quantiles)
-
-        Returns:
-            np.ndarray: Predictions in original space of shape (batch_size, features)
-        """
-
-        # Initialize list to store inverse transformed predictions
-        quantile_preds = {}
-        # Inverse transform each quantile prediction
-        for i, q in enumerate(self.quantiles):
-            pred_q = preds[:, :, i]
-            pred_q = self.scaler.inverse_transform(pred_q)
-            quantile_preds[q] = pred_q # Shape: {quantile: (time_steps, features)}
-        
-        # Stack the predictions along the last axis
-        return quantile_preds
 
 class MC_Prediction:
     def __init__(self, model, num_samples):
@@ -1391,7 +1418,7 @@ def main():
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[2],
         horizon = training_config.horizon,
-        var = True,
+        quantiles = quantiles,
     )
     
     # print('X_train shape:', X_train.shape[2])
@@ -1419,9 +1446,9 @@ def main():
 
     # Train model
     # criterion = nn.MSELoss()
-    # criterion = QuantileLoss(quantiles)
+    criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    criterion = nn.GaussianNLLLoss()
+    # criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
@@ -1438,19 +1465,18 @@ def main():
     # Inverse transform predictions
     scaler = data_processor.target_scaler
     
+    train_pred = data_processor.quantile_invert(train_pred, quantiles)
+    test_pred = data_processor.quantile_invert(test_pred, quantiles)
     
-    # inverse_transformer = QuantileTransform(quantiles, scaler)
-    # train_pred = inverse_transformer.inverse_transform(train_pred)
-    # test_pred = inverse_transformer.inverse_transform(test_pred)
+    with torch.no_grad():
+        pred = model(X.to(training_config.device)).cpu().numpy()
     
-    rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
-    means = rescaled_pred[0]
-    variances = rescaled_pred[1]
-    print(means.shape)
+    preds = data_processor.quantile_invert(pred, quantiles)
     
-    # rescaled_actual = data_processor.revert_sequences(y_train, y_test)
-    # y_train_orig = rescaled_actual[0]
-    # y_test_orig = rescaled_actual[1]
+    # rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
+    # means = rescaled_pred[0]
+    # variances = rescaled_pred[1]
+    
     
     # mc_predictor = MC_Prediction(model, num_samples=100)
     # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
@@ -1467,10 +1493,10 @@ def main():
     action_names = ['inlet temp', 'feed conc', 'coolant temp']
     visualizer = Visualizer()
     sequence_length = training_config.time_step
-    visualizer.plot_predictions(means, features, noiseless_results,
+    visualizer.plot_preds(preds, features, noiseless_results,
                                 sequence_length=sequence_length, time_horizon=training_config.horizon, 
                                 feature_names = feature_names, num_simulations=10, train_test_split=training_config.train_test_split,
-                                vars=variances)
+    )
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
