@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Iterator
 from dataclasses import dataclass
 from tqdm import tqdm
+from scipy.stats import qmc
 
 np.random.seed(42)
 
@@ -80,53 +81,97 @@ class CSTRSimulator():
         return {'Ca': setpoints}
 
     def generate_disturbances(self) -> Tuple[Dict[str, List[float]], Dict[str, np.ndarray]]:
-        """Generate random disturbances for the simulation."""
+        """Generate random disturbances using Latin Hypercube Sampling."""
         disturbance_space = {'low': np.array([320, 0.7]), 'high': np.array([350, 0.8])}
         
-        nominal_temp = np.random.uniform(disturbance_space['low'][0], disturbance_space['high'][0])
-        nominal_conc = np.random.uniform(disturbance_space['low'][1], disturbance_space['high'][1])
+        # Create LHS sampler for both temperature and concentration
+        sampler = qmc.LatinHypercube(d=2)
         
-        # Temperature disturbances
-        num_changes_temp = np.random.randint(0, self.config.T // 2)
+        # Generate base nominal values using LHS
+        max_disturbances = self.config.T // 2  # Maximum number of possible changes
+        samples = sampler.random(n=max_disturbances)
+        
+        # Scale samples to disturbance spaces
+        temp_range = disturbance_space['high'][0] - disturbance_space['low'][0]
+        conc_range = disturbance_space['high'][1] - disturbance_space['low'][1]
+        
+        temp_samples = disturbance_space['low'][0] + samples[:, 0] * temp_range
+        conc_samples = disturbance_space['low'][1] + samples[:, 1] * conc_range
+        
+        # Generate change points for temperature and concentration
+        num_changes_temp = np.random.randint(0, max_disturbances)
+        num_changes_conc = np.random.randint(0, max_disturbances)
+        
         change_points_temp = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_temp, replace=False))
-        disturbances_temp = []
-        current_disturbance_temp = nominal_temp + (np.random.rand() - 0.5) * 10
+        change_points_conc = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_conc, replace=False))
         
+        # Initialize disturbance arrays
+        disturbances_temp = []
+        disturbances_conc = []
+        temp_idx = 0
+        conc_idx = 0
+        
+        # Generate temperature disturbances
+        current_disturbance_temp = temp_samples[temp_idx] + (np.random.rand() - 0.5) * 5  # Reduced variation
         for t in range(self.config.tsim):
             if len(change_points_temp) > 0 and t == change_points_temp[0]:
-                current_disturbance_temp = nominal_temp + (np.random.rand() - 0.5) * 10
+                temp_idx = (temp_idx + 1) % len(temp_samples)
+                current_disturbance_temp = temp_samples[temp_idx] + (np.random.rand() - 0.5) * 5
                 change_points_temp = change_points_temp[1:]
             disturbances_temp.append(current_disturbance_temp)
         
-        # Concentration disturbances
-        num_changes_conc = np.random.randint(0, self.config.T // 2)
-        change_points_conc = np.sort(np.random.choice(range(1, self.config.tsim), num_changes_conc, replace=False))
-        disturbances_conc = []
-        current_disturbance_conc = nominal_conc + (np.random.rand() - 0.5) * 0.1
-        
+        # Generate concentration disturbances
+        current_disturbance_conc = conc_samples[conc_idx] + (np.random.rand() - 0.5) * 0.05  # Reduced variation
         for t in range(self.config.tsim):
             if len(change_points_conc) > 0 and t == change_points_conc[0]:
-                current_disturbance_conc = nominal_conc + (np.random.rand() - 0.5) * 0.1
+                conc_idx = (conc_idx + 1) % len(conc_samples)
+                current_disturbance_conc = conc_samples[conc_idx] + (np.random.rand() - 0.5) * 0.05
                 change_points_conc = change_points_conc[1:]
             disturbances_conc.append(current_disturbance_conc)
         
         disturbances = {'Ti': disturbances_temp, 'Caf': disturbances_conc}
-  
         
         return disturbances, disturbance_space
 
-    def simulate(self) -> SimulationResult:
-        """
-        Run a single simulation.
+    def generate_lhs_actions(self) -> List[float]:
+        """Generate action sequence using Latin Hypercube Sampling with step changes."""
+        # Create LHS sampler for actions
+        sampler = qmc.LatinHypercube(d=1)
         
-        Args:
-            time_steps (int): Number of time steps for simulation
-            
-        Returns:
-            SimulationResult: Container with simulation results
-        """
+        # Generate base action values using LHS
+        max_actions = self.config.T // 2  # Maximum number of possible changes
+        samples = sampler.random(n=max_actions)
+        
+        # Scale samples to action space
+        action_range = self.action_space['high'] - self.action_space['low']
+        action_samples = self.action_space['low'] + samples.flatten() * action_range
+        
+        # Generate change points for actions
+        num_changes = np.random.randint(0, max_actions)
+        change_points = np.sort(np.random.choice(range(1, self.config.tsim), num_changes, replace=False))
+        
+        # Initialize action sequence
+        actions = []
+        action_idx = 0
+        current_action = action_samples[action_idx] + (np.random.rand() - 0.5) * 0.1  # Small variation
+        
+        # Generate action sequence with step changes
+        for t in range(self.config.tsim):
+            if len(change_points) > 0 and t == change_points[0]:
+                action_idx = (action_idx + 1) % len(action_samples)
+                current_action = action_samples[action_idx] + (np.random.rand() - 0.5) * 0.1
+                change_points = change_points[1:]
+            actions.append(current_action)
+        
+        return self._normalize_action(np.array(actions))
+
+    def simulate(self) -> SimulationResult:
+        """Run a single simulation with LHS-generated step changes for actions and disturbances."""
         setpoints = self.generate_setpoints()
         disturbances, disturbance_space = self.generate_disturbances()
+        
+        # Generate complete action sequence
+        action_sequence = self.generate_lhs_actions()
         
         env_params = {
             'N': self.config.T,
@@ -145,46 +190,35 @@ class CSTRSimulator():
             'normal_uncertainty': self.uncertainty_percentages,
             'uncertainty_bounds': self.uncertainty_space
         }
-        # Create a noiseless environment for comparison
+        
+        # Create environments
+        env = make_env(env_params)
         noiseless_env_params = env_params.copy()
         noiseless_env_params['noise'] = False
         noiseless_env_params['noise_percentage'] = 0
-        
-        env = make_env(env_params)
         noiseless_env = make_env(noiseless_env_params)
         
-        # Create lists to store observed states, disturbances, and actions
+        # Initialize simulation variables
         observed_states = []
         disturbance_values = []
         actions = []
-        obs, _ = env.reset()
-        done = False
-        
-        
         noiseless_observed_states = []
         noiseless_disturbance_values = []
-        obs, _ = noiseless_env.reset()
         
-        num_actions = np.random.randint(0, self.config.T)
-        change_points = np.sort(np.random.choice(range(1, self.config.tsim), num_actions, replace=False))
-        initial_action = np.random.uniform(self.action_space['low'], self.action_space['high'])
-        initial_action = self._normalize_action(initial_action)
+        obs, _ = env.reset()
+        noiseless_obs, _ = noiseless_env.reset()
+        done = False
+        step = 0
+        
         # Simulation loop
         while not done:
-            if not actions:
-                action = initial_action
-            elif num_actions > 0 and env.t == change_points[0]:
-                if np.random.rand() < 0.5:
-                    action = np.random.uniform(self.action_space['low'], self.action_space['high'])
-                    action = self._normalize_action(action)
-                    change_points = change_points[1:]
-                    num_actions -= 1
-                else:
-                    action = self._normalize_action(actions[-1])
+            # Get current action from sequence
+            action = action_sequence[step]
             
             obs, _, done, _, info = env.step(action)
             noiseless_obs, _, _, _, _ = noiseless_env.step(action)
             
+            # Split and process observations
             disturbance = obs[3:5]
             uncertain_params = obs[5:]
             obs = obs[:3]
@@ -193,6 +227,7 @@ class CSTRSimulator():
             noiseless_uncertain_params = noiseless_obs[5:]
             noiseless_obs = noiseless_obs[:3]
             
+            # Unnormalize values
             obs_unnorm = self._unnormalize_observation(obs)
             disturbance_unnorm = self._unnormalize_disturbance(disturbance, disturbance_space)
             actions_unnorm = self._unnormalize_action(action)
@@ -200,16 +235,18 @@ class CSTRSimulator():
             noiseless_obs_unnorm = self._unnormalize_observation(noiseless_obs)
             noiseless_disturbance_unnorm = self._unnormalize_disturbance(noiseless_disturbance, disturbance_space)
             
+            # Store results
             observed_states.append(obs_unnorm)
             disturbance_values.append(disturbance_unnorm)
-            
             noiseless_observed_states.append(noiseless_obs_unnorm)
             noiseless_disturbance_values.append(noiseless_disturbance_unnorm)
-            
             actions.append(actions_unnorm)
+            
+            # Increment step counter
+            step += 1
         
         return self._format_results(observed_states, disturbance_values, actions), self._format_results(noiseless_observed_states, noiseless_disturbance_values, actions)
-        
+
     def run_multiple_simulations(self) -> Tuple[List[SimulationResult], List[SimulationResult]]:
         """
         Run multiple simulations and return both noisy and noiseless results.
@@ -365,12 +402,12 @@ class CSTRSimulator():
         
         return SimulationResult(obs_states, dist_states, action_states)
 
-# config = SimulationConfig(n_simulations=3, T=10, tsim=50, noise_percentage=0.1)
+# config = SimulationConfig(n_simulations=30, T=100, tsim=500, noise_percentage=0.1)
 # simulator = CSTRSimulator(config)
 
 # # # Run multiple simulations
 
-# simulation_results = simulator.run_multiple_simulations()
+# simulation_results, noiseless_results = simulator.run_multiple_simulations()
 
 # # Plot the results
-# simulator.plot_results(simulation_results)
+# simulator.plot_results(simulation_results, noiseless_results)
