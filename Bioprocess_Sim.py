@@ -3,6 +3,7 @@ from pcgym import make_env
 import matplotlib.pyplot as plt
 from typing import Callable, Dict, List, Tuple, Optional, Union, Iterator
 from dataclasses import dataclass
+from scipy.stats import qmc
 
 @dataclass
 class SimulationResult:
@@ -66,13 +67,61 @@ class BioProcessSimulator:
         
         self.x0 = np.array([1.0, 150.0, 0.0])
 
+    def generate_lhs_actions(self) -> np.ndarray:
+        """Generate 2D action sequence using Latin Hypercube Sampling with more frequent step changes."""
+        # Create LHS sampler for 2D actions
+        sampler = qmc.LatinHypercube(d=2)
+        
+        # Generate more base action values using LHS
+        max_actions = self.config.T  # Increased from T//2 to T to allow more unique actions
+        samples = sampler.random(n=max_actions)
+        
+        # Scale samples to action space - handling 2D actions
+        action_range = self.action_space['high'] - self.action_space['low']
+        action_samples = self.action_space['low'] + samples * action_range.reshape(1, -1)
+        
+        # Generate more change points for actions
+        # Increase minimum number of changes and potential maximum
+        min_changes = max_actions // 3  # Ensures at least 33% of timesteps have changes
+        num_changes = np.random.randint(min_changes, max_actions)
+        
+        # Generate change points with minimum spacing
+        min_spacing = 3  # Minimum timesteps between changes
+        available_points = list(range(1, self.config.tsim))
+        change_points = []
+        
+        while len(change_points) < num_changes and available_points:
+            point = np.random.choice(available_points)
+            change_points.append(point)
+            
+            # Remove nearby points to maintain minimum spacing
+            for i in range(max(1, point - min_spacing), min(self.config.tsim, point + min_spacing + 1)):
+                if i in available_points:
+                    available_points.remove(i)
+                    
+        change_points = np.sort(change_points)
+        
+        # Initialize action sequence
+        actions = []
+        action_idx = 0
+        current_action = action_samples[action_idx] + (np.random.rand(2) - 0.5) * 0.1  # Small variation
+        
+        # Generate action sequence with step changes
+        for t in range(self.config.tsim):
+            if len(change_points) > 0 and t == change_points[0]:
+                action_idx = (action_idx + 1) % len(action_samples)
+                current_action = action_samples[action_idx] + (np.random.rand(2) - 0.5) * 0.1
+                change_points = change_points[1:]
+            actions.append(current_action)
+        
+        return self._normalize_action(np.array(actions))
 
     def simulate(self) -> SimulationResult:
         """
-        Run the simulation and return the observed states and actions.
+        Run the simulation with LHS-generated actions and return the observed states and actions.
         
         Returns:
-            Tuple[Dict, Dict]: Observed states and actions
+            SimulationResult: Formatted simulation results
         """
         observed_states = []
         uncertain_parameters = []
@@ -103,50 +152,39 @@ class BioProcessSimulator:
         
         self.env = make_env(env_params)
         
+        # Generate complete action sequence using LHS
+        action_sequence = self.generate_lhs_actions()
+        
         obs, _ = self.env.reset()
         done = False
-        num_actions = np.random.randint(0, self.config.T // 2)
+        step = 0
         
-        # Initialize with random action
-        initial_action = np.random.uniform(
-            self.action_space['low'],
-            self.action_space['high'],
-            size=(2,)
-        )
-        initial_action = self._normalize_action(initial_action)
-        
+        # Simulation loop
         while not done:
-            if not actions:
-                action = initial_action
-            else:
-                if num_actions > 0:
-                    if np.random.rand() < 0.15:
-                        action = np.random.uniform(
-                            self.action_space['low'],
-                            self.action_space['high'],
-                            size=(2,)
-                        )
-                        action = self._normalize_action(action)
-                        num_actions -= 1
-                    else:
-                        action = actions[-1]
-                        action = self._normalize_action(actions[-1])
-                        
+            # Get current action from LHS sequence
+            action = action_sequence[step]
+            
+            # Run simulation step
             obs, _, done, _, info = self.env.step(action)
             con_check, g = self.env.constraint_check(obs, action)
+            
+            # Split and process observations
             uncertain_params = obs[3:]
             obs = obs[:3]
             
-            
-            
+            # Unnormalize values
             obs_unnorm = self._unnormalize_observation(obs)
             actions_unnorm = self._unnormalize_action(action)
             uncertain_params_unnorm = self._unnormalize_uncertainty(uncertain_params)
             
+            # Store results
             observed_states.append(obs_unnorm)
             actions.append(actions_unnorm)
             uncertain_parameters.append(uncertain_params_unnorm)
             const_values.append(g)
+            
+            # Increment step counter
+            step += 1
         
         return self._format_results(observed_states, actions, const_values)
     
@@ -294,7 +332,7 @@ class BioProcessSimulator:
         # plt.show()
         
         
-# sim_config = SimulationConfig(n_simulations=100, T=20, tsim=240, noise_percentage=0.01)
-# simulator = BioProcessSimulator(sim_config)
-# simulation_results = simulator.run_multiple_simulations()
-# simulator.plot_results(simulation_results)
+sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240, noise_percentage=0.01)
+simulator = BioProcessSimulator(sim_config)
+simulation_results = simulator.run_multiple_simulations()
+simulator.plot_results(simulation_results)
