@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from typing import Callable, Dict, List, Tuple, Optional, Union, Iterator
 from dataclasses import dataclass
 from scipy.stats import qmc
+from tqdm import tqdm
 
 @dataclass
 class SimulationResult:
@@ -127,6 +128,7 @@ class BioProcessSimulator:
         uncertain_parameters = []
         actions = []
         const_values = []
+        noiseless_observed_states = []
         
         env_params = {
             'N': self.config.T,
@@ -151,11 +153,16 @@ class BioProcessSimulator:
         }
         
         self.env = make_env(env_params)
+        noiseless_env_params = env_params.copy()
+        noiseless_env_params['noise'] = False
+        noiseless_env_params['noise_percentage'] = 0
+        noiseless_env = make_env(noiseless_env_params)
         
         # Generate complete action sequence using LHS
         action_sequence = self.generate_lhs_actions()
         
         obs, _ = self.env.reset()
+        noiseless_obs, _ = noiseless_env.reset()
         done = False
         step = 0
         
@@ -166,27 +173,33 @@ class BioProcessSimulator:
             
             # Run simulation step
             obs, _, done, _, info = self.env.step(action)
+            noiseless_obs, _, _, _, _ = noiseless_env.step(action)
             con_check, g = self.env.constraint_check(obs, action)
             
             # Split and process observations
             uncertain_params = obs[3:]
             obs = obs[:3]
             
+            noiseless_obs = noiseless_obs[:3]
+            
             # Unnormalize values
             obs_unnorm = self._unnormalize_observation(obs)
             actions_unnorm = self._unnormalize_action(action)
             uncertain_params_unnorm = self._unnormalize_uncertainty(uncertain_params)
+            
+            noiseless_obs_unnorm = self._unnormalize_observation(noiseless_obs)
             
             # Store results
             observed_states.append(obs_unnorm)
             actions.append(actions_unnorm)
             uncertain_parameters.append(uncertain_params_unnorm)
             const_values.append(g)
+            noiseless_observed_states.append(noiseless_obs_unnorm)
             
             # Increment step counter
             step += 1
         
-        return self._format_results(observed_states, actions, const_values)
+        return self._format_results(observed_states, actions, const_values), self._format_results(noiseless_observed_states, actions, const_values)
     
     def run_multiple_simulations(self) -> List[SimulationResult]:
         """
@@ -198,7 +211,14 @@ class BioProcessSimulator:
         Returns:
             List[SimulationResult]: List of simulation results
         """
-        return [self.simulate() for _ in range(self.config.n_simulations)]
+        noisy_results = []
+        noiseless_results = []
+        
+        for _ in tqdm(range(self.config.n_simulations), desc="Running simulations"):
+            noisy_sim, noiseless_sim = self.simulate()
+            noisy_results.append(noisy_sim)
+            noiseless_results.append(noiseless_sim)
+        return noisy_results, noiseless_results
 
     def _normalize_action(self, action: np.ndarray) -> np.ndarray:
         """Normalize action to [-1, 1] range."""
@@ -250,50 +270,59 @@ class BioProcessSimulator:
         
         return SimulationResult(obs_states, formatted_actions, con_check)
 
-    def plot_results(self, results: List[SimulationResult]) -> None:
+    def plot_results(self, noisy_results: List[SimulationResult], noiseless_results: List[SimulationResult]) -> None:
         """
-        Plot results from multiple simulations.
+        Plot results from multiple simulations, including both noisy and noiseless results.
         
         Args:
-            results (List[SimulationResult]): List of simulation results
+            noisy_results (List[SimulationResult]): List of noisy simulation results
+            noiseless_results (List[SimulationResult]): List of noiseless simulation results
         """
         # Create subplots for observed states
         fig_obs, axs_obs = plt.subplots(3, 1, figsize=(15, 9))
         fig_act, axs_act = plt.subplots(2, 1, figsize=(12, 8))
         fig_con, axs_con = plt.subplots(1, 1, figsize=(12, 8))
         
+        colors = plt.cm.tab10(np.linspace(0, 1, len(noisy_results)))
+        
         # Plot observed states
-        for i, result in enumerate(results):
-            axs_obs[0].plot(result.observed_states['c_x'], label=f'Simulation {i+1}')
+        for i, ((noisy_result, noiseless_result), color) in enumerate(zip(zip(noisy_results, noiseless_results), colors)):
+            axs_obs[0].plot(noisy_result.observed_states['c_x'], label=f'Noisy Simulation {i+1}', color = color)
+            axs_obs[0].plot(noiseless_result.observed_states['c_x'], linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_obs[0].set_title('Concentration of Biomass (g/L)')
             axs_obs[0].set_xlabel('Time (h)')
             axs_obs[0].set_ylabel('c_X')
             
-            axs_obs[1].plot(result.observed_states['c_N'], label=f'Simulation {i+1}')
+            axs_obs[1].plot(noisy_result.observed_states['c_N'], label=f'Noisy Simulation {i+1}', color = color)
+            axs_obs[1].plot(noiseless_result.observed_states['c_N'], linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_obs[1].set_title('Nitrate Concentration (g/L)')
             axs_obs[1].axhline(y=800, color='r', linestyle='--', label='Constraint: c_N < 800')
             axs_obs[1].set_xlabel('Time (h)')
             axs_obs[1].set_ylabel('c_N')
             
-            axs_obs[2].plot(result.observed_states['c_q'], label=f'Simulation {i+1}')
+            axs_obs[2].plot(noisy_result.observed_states['c_q'], label=f'Noisy Simulation {i+1}', color = color)
+            axs_obs[2].plot(noiseless_result.observed_states['c_q'], linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_obs[2].set_title('Bioproduct Concentration (g/L)')
             axs_obs[2].set_xlabel('Time (h)')
             axs_obs[2].set_ylabel('c_q')
         
         # Plot actions
-        for i, result in enumerate(results):
-            axs_act[0].plot(result.actions['I'], label=f'Simulation {i+1}')
+        for i, ((noisy_result, noiseless_result), color) in enumerate(zip(zip(noisy_results, noiseless_results), colors)):
+            axs_act[0].plot(noisy_result.actions['I'], label=f'Noisy Simulation {i+1}', color = color)
+            axs_act[0].plot(noiseless_result.actions['I'], linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_act[0].set_title('Light Intensity (micromol / m^2 s)')
             axs_act[0].set_xlabel('Time (h)')
             axs_act[0].set_ylabel('I')
         
-            axs_act[1].plot(result.actions['F_N'], label=f'Simulation {i+1}')
+            axs_act[1].plot(noisy_result.actions['F_N'], label=f'Noisy Simulation {i+1}', color = color)
+            axs_act[1].plot(noiseless_result.actions['F_N'], linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_act[1].set_title('Nitrate Flowrate (mg / L h)')
             axs_act[1].set_xlabel('Time (h)')
             axs_act[1].set_ylabel('F_N')
         
-        for i, result in enumerate(results):
-            axs_con.plot(np.array(result.observed_states['c_q']) / np.array(result.observed_states['c_x']), label=f'Simulation {i+1}')
+        for i, ((noisy_result, noiseless_result), color) in enumerate(zip(zip(noisy_results, noiseless_results), colors)):
+            axs_con.plot(np.array(noisy_result.observed_states['c_q']) / np.array(noisy_result.observed_states['c_x']), label=f'Noisy Simulation {i+1}', color = color)
+            axs_con.plot(np.array(noiseless_result.observed_states['c_q']) / np.array(noiseless_result.observed_states['c_x']), linestyle='--', label=f'Noiseless Simulation {i+1}', color = color)
             axs_con.axhline(y=0.011, color='r', linestyle='--')
             axs_con.set_title('Ratio of Bioproduct to Biomass Concentration Constraint')
             axs_con.set_xlabel('Time (h)')
@@ -305,34 +334,13 @@ class BioProcessSimulator:
         for ax in axs_act:
             ax.legend(loc='upper right', fontsize='small', ncol=2)
         axs_con.legend(loc='upper right', fontsize='small', ncol=2)
-        plt.tight_layout()
+        # Adjust layouts
+        for fig in [fig_obs, fig_act, fig_con]:
+            fig.tight_layout()
         plt.show()
 
-        # # Plot c_x vs c_q
-        # plt.figure(figsize=(10, 5))
-        # for i in range(num_simulations):
-        #     plt.plot(all_obs_states[i]['c_x'], all_obs_states[i]['c_q'], label=f'Sim {i+1} c_x vs c_q')
-        # plt.xlabel('c_x')
-        # plt.ylabel('c_q')
-        # plt.title('Plot of c_x against c_q')
-        # plt.legend()
-        # plt.grid(True)
-        # plt.show()
-
-        # # Plot c_N constraint
-        # plt.figure(figsize=(10, 5))
-        # for i in range(num_simulations):
-        #     plt.plot(all_obs_states[i]['c_N'], label=f'Sim {i+1} c_N')
-        # plt.axhline(y=800, color='r', linestyle='--', label='Constraint: c_N < 800')
-        # plt.xlabel('Time step')
-        # plt.ylabel('c_N')
-        # plt.title('Plot of c_N with constraint')
-        # plt.legend()
-        # plt.grid(True)
-        # plt.show()
         
-        
-sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240, noise_percentage=0.01)
-simulator = BioProcessSimulator(sim_config)
-simulation_results = simulator.run_multiple_simulations()
-simulator.plot_results(simulation_results)
+# sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240, noise_percentage=0.01)
+# simulator = BioProcessSimulator(sim_config)
+# simulation_results, noiseless_results = simulator.run_multiple_simulations()
+# simulator.plot_results(simulation_results, noiseless_results)
