@@ -15,11 +15,12 @@ from CSTR_Sim import *
 from utils import *
 from tqdm.notebook import tqdm
 np.random.seed(42)
+torch.manual_seed(42)
 
 # Create simulation
 
 simulation_config = SimulationConfig(
-    n_simulations=10000,
+    n_simulations=10,
     T = 100, # Change the number of time steps
     tsim = 500,
     noise_percentage = 0.01
@@ -98,7 +99,7 @@ MLR_Config = MLRConfig(
 )
 
 LSTM_bounds = {
-    'hidden_dim': (32, 512),
+    'hidden_dim': (32, 1024),
     'num_layers': (1, 50),
     'dropout': (0.1, 0.9),
     'bidirectional': (0, 1),
@@ -110,20 +111,19 @@ CNN_bounds = {
     'kernel_sizes': [(1, 15), (1, 11)],       # Very small (1) to very large (15) receptive fields
     'fc_dims': [(16, 2048), (32, 4096)],      # Fully connected layers from tiny to massive
     'dropout': (0.0, 0.9),                    # Almost full range of dropout (up to extreme regularization)
-    'norm_type' : (0, 2),                       # No normalization, batch normalization, layer normalization'
 }
 
 TF_bounds = {
     'num_layers': (1, 50),
-    'hidden_dim': (32, 512),
-    'd_model': (32, 512),
+    'hidden_dim': (32, 1024),
+    'd_model': (32, 1024),
     'num_heads': (1, 8),
-    'dim_feedforward': (32, 512),
+    'dim_feedforward': (32, 1024),
     'dropout': (0.1, 0.9),
 }
 
 MLP_bounds = {
-    'hidden_dim': (32, 512),
+    'hidden_dim': (32, 1024),
     'num_layers': (1, 50),
     'dropout': (0.1, 0.9),
     'activation': (0, 7),  # Assuming 0: ReLU, 1: Tanh, 2: Sigmoid
@@ -146,28 +146,41 @@ model_dict = {
 
 # Iterate through each defined model to optimise
 
-for model, (model_config, bounds) in model_dict.items():
-    print(f"Model: {model}")
-    model_config = model_config
-    bounds = bounds
+model = MLR
+model_config = model_dict[model][0]
+bounds = model_dict[model][1]
 
-    # Define the path to save the model to
-    path = f'models/CSTR_NLL_{model}.pth'
+# Define the path to save the model to
 
-    optimiser = ModelOptimisation(
-        model_class= model,
-        sim_config = simulation_config,
-        train_config = training_config,
-        model_config = model_config,
-        config_bounds=bounds,
-        simulator = CSTRSimulator,
-        converter = CSTRConverter,
-        data_processor = DataProcessor,
-        trainer_class = ModelTrainer,
-        iters = 300,
-        quantiles = None, # Define how to quantify uncertainty
-        monte_carlo = None,
-        variance = True,
-        
-    )
-    best_params, best_los  = optimiser.optimise(path)
+quantiles = [0.1, 0.5, 0.9]
+
+optimiser = ModelOptimisation(
+    model_class= model,
+    sim_config = simulation_config,
+    train_config = training_config,
+    model_config = model_config,
+    config_bounds=bounds,
+    simulator = CSTRSimulator,
+    converter = CSTRConverter,
+    data_processor = DataProcessor,
+    trainer_class = ModelTrainer,
+    iters = 300,
+    quantiles = quantiles, # Define how to quantify uncertainty
+    monte_carlo = None,
+    variance = None,
+    
+)
+
+if optimiser.quantiles:
+    uncertainty = 'qtle'
+
+if optimiser.monte_carlo:
+    uncertainty = 'MC'
+
+if optimiser.variance:
+    uncertainty = 'NLL'
+
+
+path = f'models/CSTR_{uncertainty}_{model}.pth'
+
+best_params, best_loss  = optimiser.optimise(path)

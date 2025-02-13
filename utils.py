@@ -21,6 +21,19 @@ from CSTR_Sim import *
 np.random.seed(42)
 from fvcore.nn import FlopCountAnalysis
 
+# Turn on Latex for last bit because it takes fucking ages
+
+# plt.rcParams.update({
+#     "text.usetex": True,  # Use LaTeX for text rendering
+#     "font.family": "serif",  # Use a serif font
+#     "font.serif": ["Computer Modern"],  # Default LaTeX font
+#     "axes.labelsize": 14,  # Set font size for axes labels
+#     "font.size": 12,  # Set global font size
+#     "legend.fontsize": 12,  # Set legend font size
+#     "xtick.labelsize": 12,  # Set x-axis tick size
+#     "ytick.labelsize": 12,  # Set y-axis tick size
+# })
+
 @dataclass
 class ConformityScore:
     """Store different types of conformity scores for regression"""
@@ -251,7 +264,7 @@ class DataProcessor:
             The reconstructed time series (shape: [n_time_steps, num_features])
         """
         num_sequences, time_horizon, num_features = sequence.shape
-        n_time_steps = self.targets.shape[0]
+        n_time_steps = self.targets.shape[0] - self.config.time_step - 1 # steps to predict - miss the last value because maths is pastied
         # if train_data:
         #     n_time_steps = int(num_sequences + self.config.train_test_split*(time_horizon + self.config.time_step))
         # else:
@@ -260,7 +273,7 @@ class DataProcessor:
         reconstructed = np.zeros((n_time_steps, num_features))
         count = np.zeros((n_time_steps, 1))
 
-        for i in range(num_sequences - 1):
+        for i in range(num_sequences):
             for h in range(time_horizon):
                 t_index = i + h  # The actual time index in the full sequence
                 reconstructed[t_index] += sequence[i, h]
@@ -305,17 +318,16 @@ class DataProcessor:
         # Reconstruct the sequences into (time steps, observed preds, features)
         # The prediction only begins after the first sequence, so clip the last values
         train_mean = self.reconstruct_sequence(train_mean, True)
-        train_mean = train_mean[:-(self.config.time_step - 1)]
         if test_mean is not None:
             test_mean = self.reconstruct_sequence(test_mean, False)
-            test_mean = test_mean[:-(self.config.time_step - 1)]
+# if its pastied remove last 10 again
         # Do it for the variance too
         if train_var is not None:
             train_var = self.reconstruct_sequence(train_var, True)
-            train_var = train_var[:-(self.config.time_step - 1)]
+
         if test_var is not None:
             test_var = self.reconstruct_sequence(test_var, False)
-            test_var = test_var[:-(self.config.time_step - 1)]
+
 
         if test_var is None:
             return self.target_scaler.inverse_transform(train_mean)
@@ -710,9 +722,7 @@ class Visualizer:
         plt.legend()
         plt.show()
         
-        
 
-    
     @staticmethod
     def plot_loss_loss(history: Dict[str, List[float]]):
         """Plots the Pareto frontier of train vs test loss"""
@@ -959,7 +969,7 @@ class ModelOptimisation:
             model_kwargs = {
                 'config': self.model_config,
                 'input_dim': X_train.shape[1] * X_train.shape[2],
-                'output_dim': y_train.shape[1],
+                'output_dim': y_train.shape[2],
                 'horizon': self.train_config.horizon
             }
         else:
@@ -1040,12 +1050,9 @@ class ModelOptimisation:
         simulation_results, _ = self.simulator.run_multiple_simulations()
         features, targets = self.converter.convert(simulation_results)        
         data_processor = self.data_processor(self.train_config, features, targets)
-        if self.model_class == MLP:
-            (train_loader, test_loader, X_train, X_test,
-            y_train, y_test, X, y) = data_processor.prepare_data_ANNs()
-        else:    
-            (train_loader, test_loader, X_train, X_test,
-            y_train, y_test, X, y) = data_processor.prepare_data()
+
+        (train_loader, test_loader, X_train, X_test,
+        y_train, y_test, X, y) = data_processor.prepare_data()
         
             
         self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion(X_train, y_train)
@@ -1354,7 +1361,7 @@ def main():
     )
     LSTM_Config = LSTMConfig(
         hidden_dim = 64,
-        num_layers=4,
+        num_layers=8,
         dropout = 0.2,
         bidirectional=False,
         norm_type = None,
@@ -1463,14 +1470,14 @@ def main():
             test_pred = model(X_test.to(training_config.device)).cpu().numpy()
 
     # Inverse transform predictions
-    scaler = data_processor.target_scaler
+    # scaler = data_processor.target_scaler
     
-    train_pred = data_processor.quantile_invert(train_pred, quantiles)
-    test_pred = data_processor.quantile_invert(test_pred, quantiles)
+    # train_pred = data_processor.quantile_invert(train_pred, quantiles)
+    # test_pred = data_processor.quantile_invert(test_pred, quantiles)
     
     with torch.no_grad():
         pred = model(X.to(training_config.device)).cpu().numpy()
-    
+    print('gau')
     preds = data_processor.quantile_invert(pred, quantiles)
     
     # rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
