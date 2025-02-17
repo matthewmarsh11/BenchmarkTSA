@@ -13,7 +13,6 @@ from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
 from utils import *
-from tqdm.notebook import tqdm
 np.random.seed(42)
 torch.manual_seed(42)
 
@@ -164,10 +163,10 @@ optimiser = ModelOptimisation(
     converter = CSTRConverter,
     data_processor = DataProcessor,
     trainer_class = ModelTrainer,
-    iters = 300,
-    quantiles = quantiles, # Define how to quantify uncertainty
+    iters = 50,
+    quantiles = None, # Define how to quantify uncertainty
     monte_carlo = None,
-    variance = None,
+    variance = True,
     
 )
 
