@@ -920,6 +920,7 @@ class ModelOptimisation:
         self.monte_carlo = monte_carlo
         self.variance = variance
         self.domain = self._create_domain()
+        self.mdl_num = 0
 
 
     def _create_domain(self):
@@ -955,7 +956,7 @@ class ModelOptimisation:
         
         return domain
 
-    def initialize_model_and_criterion(self, X_train, y_train):
+    def initialize_model_and_criterion(self):
         """
         Initialize model and criterion with support for multiple uncertainty estimation methods:
         - Quantile regression
@@ -968,15 +969,15 @@ class ModelOptimisation:
         if self.model_class == MLP or self.model_class == MLR:
             model_kwargs = {
                 'config': self.model_config,
-                'input_dim': X_train.shape[1] * X_train.shape[2],
-                'output_dim': y_train.shape[2],
+                'input_dim': self.X_train.shape[1] * self.X_train.shape[2],
+                'output_dim': self.y_train.shape[2],
                 'horizon': self.train_config.horizon
             }
         else:
             model_kwargs = {
                 'config': self.model_config,
-                'input_dim': X_train.shape[2],
-                'output_dim': y_train.shape[2],
+                'input_dim': self.X_train.shape[2],
+                'output_dim': self.y_train.shape[2],
                 'horizon': self.train_config.horizon
             }
             
@@ -1051,11 +1052,11 @@ class ModelOptimisation:
         features, targets = self.converter.convert(simulation_results)        
         data_processor = self.data_processor(self.train_config, features, targets)
 
-        (train_loader, test_loader, X_train, X_test,
-        y_train, y_test, X, y) = data_processor.prepare_data()
+        (train_loader, test_loader, self.X_train, self.X_test,
+        self.y_train, self.y_test, self.X, self.y) = data_processor.prepare_data()
         
             
-        self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion(X_train, y_train)
+        self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion()
         
         # Train the model
         self.trainer = self.trainer_class(self.model, self.train_config)
@@ -1068,9 +1069,9 @@ class ModelOptimisation:
         # Can you actually optimise to reduce aleatoric uncertainty?
         if use_monte_carlo:
             mc_predictor = self.monte_carlo(self.model, num_samples=100)
-            _, train_var = mc_predictor.predict(X_train.to(self.train_config.device))
+            _, train_var = mc_predictor.predict(self.X_train.to(self.train_config.device))
             average_loss = average_loss + np.concatenate(train_var).sum()
-        
+            
         return average_loss
     
     
@@ -1085,28 +1086,88 @@ class ModelOptimisation:
             maximize = False
         )
         
-        max_iter = self.iters
-        with tqdm(total=max_iter, desc="Optimisation Progress", position=0, leave=True) as pbar:
-            best_loss = float('inf')
-            for i in range(max_iter):
-                optimizer.run_optimization(max_iter=1)
-                pbar.update(1)
-                pbar.set_postfix({'Loss': optimizer.fx_opt})
-                if optimizer.fx_opt < best_loss:
-                    best_loss = optimizer.fx_opt
-                    best_params = optimizer.x_opt
-                    best_params = self.decode_parameters(best_params)
-                    checkpoint = {
-                        'model_state_dict': self.model.state_dict(),
-                        'model_config': self.model_config,
-                        'training_config': self.train_config,
-                    }
-                    torch.save(checkpoint, path)
+        if self.variance:
+            max_iter = self.iters
+            with tqdm(total=max_iter, desc="Optimisation Progress", position=0, leave=True) as pbar:
+                best_loss = float('inf')
+                for i in range(max_iter):
+                    optimizer.run_optimization(max_iter=1)
+                    pbar.update(1)
+                    pbar.set_postfix({'Loss': optimizer.fx_opt})
+                    if optimizer.fx_opt < -0.5:
+                        best_loss = optimizer.fx_opt
+                        best_params = optimizer.x_opt
+                        best_params = self.decode_parameters(best_params)
+                        
+                        # Fix the path handling
+                        base_path = path.rsplit('.', 1)[0]  # Remove the extension
+                        if '_model_' in base_path:
+                            base_path = base_path.split('_model_')[0]  # Remove any existing model number
+                        new_path = f"{base_path}_model_{self.mdl_num}.pth"
+                        
+                        checkpoint = {
+                            'model_state_dict': self.model.state_dict(),
+                            'model_config': self.model_config,
+                            'training_config': self.train_config,
+                        }
+                        
+                        if self.model_class == MLP or self.model_class == MLR:
+                            input_dim = self.X_train.shape[1] * self.X_train.shape[2]
+                        else:
+                            input_dim = self.X_train.shape[2]
+                            
+                        model = self.model_class(checkpoint['model_config'],
+                                                input_dim=input_dim,
+                                                output_dim=self.y_train.shape[2],  
+                                                horizon=checkpoint['training_config'].horizon,
+                                                var=True)
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        model.eval()
+                        
+                        with torch.no_grad():
+                            mean, var = model(self.X)
+                            mse = nn.MSELoss()
+                            self.mse_loss = mse(mean, self.y)
+                            self.avg_var = torch.mean(var)
+                            checkpoint['var'] = self.avg_var
+                            checkpoint['mse'] = self.mse_loss
                 
-        return best_params, best_loss
+                            torch.save(checkpoint, new_path)
+                            self.mdl_num += 1
+                
+            return best_params, best_loss
+                        
+        else:
+            max_iter = self.iters
+            with tqdm(total=max_iter, desc="Optimisation Progress", position=0, leave=True) as pbar:
+                best_loss = float('inf')
+                for i in range(max_iter):
+                    optimizer.run_optimization(max_iter=1)
+                    pbar.update(1)
+                    pbar.set_postfix({'Loss': optimizer.fx_opt})
+                    if optimizer.fx_opt < best_loss:
+                        best_loss = optimizer.fx_opt
+                        best_params = optimizer.x_opt
+                        best_params = self.decode_parameters(best_params)
+                        checkpoint = {
+                            'model_state_dict': self.model.state_dict(),
+                            'model_config': self.model_config,
+                            'training_config': self.train_config,
+                        }
+                        torch.save(checkpoint, path)
+                    
+            return best_params, best_loss
     
     def save_model(self, model, path):
-        torch.save({'model_state_dict': model.state_dict(),
+        if self.variance:
+            torch.save({'model_state_dict': model.state_dict(),
+                    'config': self.model_config,
+                    'train_config': self.train_config,
+                    'var': self.avg_var,
+                    'mse': self.mse_loss
+                    }, path)
+        else:
+            torch.save({'model_state_dict': model.state_dict(),
                     'config': self.model_config,
                     }, path)
     
