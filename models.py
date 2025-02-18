@@ -58,43 +58,37 @@ class LSTM(BaseModel):
             bidirectional=self.config.bidirectional
         )
         
-        # Normalise the layer if this is chosen
         self.first_bn = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
         self.first_ln = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
         self.first_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
         
-        # Build the other layers
-        self.lstm_layers = nn.ModuleList()
-        self.bn_layers = nn.ModuleList()
-        self.ln_layers = nn.ModuleList()
-        self.dropout_layers = nn.ModuleList()
-        
-        for _ in range(self.config.num_layers - 1):
-            lstm = nn.LSTM(
+        # Additional LSTM layers
+        self.lstm_layers = nn.ModuleList([
+            nn.LSTM(
                 lstm_output_dim,
                 self.config.hidden_dim,
-                num_layers = 1,
+                num_layers=1,
                 batch_first=True,
-                dropout=self.config.dropout,
+                dropout=0,  # Dropout is handled separately
                 bidirectional=self.config.bidirectional
-            )
-            # self.lstm_layers.append(lstm)
-            
-            if monte_carlo:
-                do = nn.Dropout(p=self.config.dropout)
-                self.dropout_layers.append(do)
-            
-            if getattr(self.config.norm_type, 'batch', False):
-                bn = nn.BatchNorm1d(lstm_output_dim)
-                self.bn_layers.append(bn)
-            else:
-                self.bn_layers.append(None)
-            
-            if getattr(self.config.norm_type, 'layer', False):
-                ln = nn.LayerNorm(lstm_output_dim)
-                self.ln_layers.append(ln)
-            else:
-                self.ln_layers.append(None)
+            ) for _ in range(self.config.num_layers - 1)
+        ])
+        
+        # Normalization and dropout for additional layers
+        self.bn_layers = nn.ModuleList([
+            nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.ln_layers = nn.ModuleList([
+            nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.dropout_layers = nn.ModuleList([
+            nn.Dropout(p=self.config.dropout) if monte_carlo else None
+            for _ in range(self.config.num_layers - 1)
+        ])
         
         self.fc = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
         
@@ -102,6 +96,7 @@ class LSTM(BaseModel):
             self.fc_logvar = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
         
         num_directions = 2 if self.config.bidirectional else 1
         # As LSTM is layerwise, needs to be 1 or 2 depending on bidirectional
@@ -132,9 +127,9 @@ class LSTM(BaseModel):
             
         # Apply the other layers
         for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
-            h0 = torch.zeros(self.config.num_layers-1, x.size(0), 
+            h0 = torch.zeros(num_directions, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
-            c0 = torch.zeros(self.config.num_layers-1, x.size(0), 
+            c0 = torch.zeros(num_directions, x.size(0), 
                             self.config.hidden_dim).to(self.config.device)
             
             lstm_out, _ = lstm(lstm_out, (h0, c0))
@@ -162,7 +157,6 @@ class LSTM(BaseModel):
             # from the fully connected layer
             var = torch.exp(self.fc_logvar(lstm_out[:, -1, :]))
             x = self.fc(lstm_out[:, -1, :])
-            
             return x.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
         
         if self.quantiles is not None:
@@ -175,36 +169,278 @@ class LSTM(BaseModel):
 
 class EncoderLSTM(BaseModel):
     
-    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int):
-        super.__init__(config)
-        self.input_dim = input_dim
-        self.output_dim = output_dim
+    def __init__(self, config: LSTMConfig, input_dim: int,
+                 monte_carlo: Optional[bool] = False):
+        super().__init__(config)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        self.input_dim = input_dim
+        self.monte_carlo = monte_carlo
+        
+        lstm_output_dim = self.config.hidden_dim * 2 if self.config.bidirectional else self.config.hidden_dim
+
+        self.BatchNorm = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.LayerNorm = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        
+        # Normalise the first layer if BatchNorm or LayerNorm is specified
+        self.input_bn = nn.BatchNorm1d(input_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.input_ln = nn.LayerNorm(input_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.input_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
+
+        # Build the first LSTM Layer input dim -> hidden dim
+        
+        self.first_lstm = nn.LSTM(
+            input_dim, 
+            self.config.hidden_dim, 
+            num_layers=1,
+            batch_first=True, 
+            dropout=self.config.dropout, 
+            bidirectional=self.config.bidirectional
+        )
+        
+        # Normalise the layer if this is chosen
+        self.first_bn = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.first_ln = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.first_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
+        
+        self.lstm_layers = nn.ModuleList([
+            nn.LSTM(
+                lstm_output_dim,
+                self.config.hidden_dim,
+                num_layers=1,
+                batch_first=True,
+                dropout=0,  # Dropout is handled separately
+                bidirectional=self.config.bidirectional
+            ) for _ in range(self.config.num_layers - 1)
+        ])
+        
+        # Normalization and dropout for additional layers
+        self.bn_layers = nn.ModuleList([
+            nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.ln_layers = nn.ModuleList([
+            nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.dropout_layers = nn.ModuleList([
+            nn.Dropout(p=self.config.dropout) if monte_carlo else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+    def forward(self, x: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        
+        num_directions = 2 if self.config.bidirectional else 1
+        if hidden is None:
+            h0 = torch.zeros(num_directions, x.size(0), self.config.hidden_dim).to(self.config.device)
+            c0 = torch.zeros(num_directions, x.size(0), self.config.hidden_dim).to(self.config.device)
+            hidden = (h0, c0)
+        
+        if self.input_bn is not None:
+            x = x.transpose(1,2)
+            x = self.input_bn(x)
+            x = x.transpose(1,2)
+        if self.input_ln is not None:
+            x = self.input_ln(x)
+        if self.input_do is not None:
+            x = self.input_do(x)
+            
+        out, hidden = self.first_lstm(x, (h0, c0))
+        
+        if self.first_bn is not None:
+            out = out.transpose(1,2)
+            out = self.first_bn(out)
+            out = out.transpose(1,2)
+        if self.first_ln is not None:
+            out = self.first_ln(out)
+        if self.first_do is not None:
+            out = self.first_do(out)
+            
+        for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
+            h0 = torch.zeros(num_directions, x.size(0), self.config.hidden_dim).to(self.config.device)
+            c0 = torch.zeros(num_directions, x.size(0), self.config.hidden_dim).to(self.config.device)
+            
+            out, hidden = lstm(out, (h0, c0))
+            
+            if bn_layer is not None:
+                out = out.transpose(1,2)
+                out = bn_layer(out)
+                out = out.transpose(1,2)
+            if ln_layer is not None:
+                out = ln_layer(out)
+            if self.monte_carlo:
+                out = do_layer(out)
+                
+        if self.monte_carlo:
+            out = nn.Dropout(p=self.config.dropout)(out)
+            
+        return out, hidden
         
 
 class DecoderLSTM(BaseModel):
     
-    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int):
-        super.__init__(config)
-        self.input_dim = input_dim
+    def __init__(self, config: LSTMConfig, output_dim: int, horizon: int, quantiles: Optional[List[float]] = None, monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
+        super().__init__(config)
+        
         self.output_dim = output_dim
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        self.horizon = horizon
+        
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
+
+        lstm_output_dim = self.config.hidden_dim * 2 if self.config.bidirectional else self.config.hidden_dim
+
+        self.BatchNorm = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.LayerNorm = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        
+        # Normalise the first layer if BatchNorm or LayerNorm is specified
+        self.input_bn = nn.BatchNorm1d(self.config.hidden_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.input_ln = nn.LayerNorm(self.config.hidden_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.input_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
+
+        # If quantiles are specified, initialise the quantile model
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+
+        # Build the first LSTM Layer input dim -> hidden dim
+        
+        self.first_lstm = nn.LSTM(
+            self.config.hidden_dim, 
+            self.config.hidden_dim, 
+            num_layers=1,
+            batch_first=True, 
+            dropout=self.config.dropout, 
+            bidirectional=self.config.bidirectional
+        )
+        
+        # Normalise the layer if this is chosen
+        self.first_bn = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.first_ln = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.first_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
+        
+        self.lstm_layers = nn.ModuleList([
+            nn.LSTM(
+                lstm_output_dim,
+                self.config.hidden_dim,
+                num_layers=1,
+                batch_first=True,
+                dropout=0,  # Dropout is handled separately
+                bidirectional=self.config.bidirectional
+            ) for _ in range(self.config.num_layers - 1)
+        ])
+        
+        # Normalization and dropout for additional layers
+        self.bn_layers = nn.ModuleList([
+            nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.ln_layers = nn.ModuleList([
+            nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.dropout_layers = nn.ModuleList([
+            nn.Dropout(p=self.config.dropout) if monte_carlo else None
+            for _ in range(self.config.num_layers - 1)
+        ])
+        
+        self.fc = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
+        
+        if self.var: # If using the negative log likelihood loss function, add the log variance layer
+            self.fc_logvar = nn.Linear(lstm_output_dim, self.output_dim * self.horizon)
+
+    def forward(self,
+                decoder_input,
+                encoder_hidden):
+
+        decoder_hidden = encoder_hidden
+        x = decoder_input        
+
+        if self.input_bn is not None:
+            x = x.transpose(1,2)
+            x = self.input_bn(x)
+            x = x.transpose(1,2)
+        if self.input_ln is not None:
+            x = self.input_ln(x)
+        if self.input_do is not None:
+            x = self.input_do(x)
+        
+        # Pass through the first layer
+        lstm_out, decoder_hidden = self.first_lstm(x, decoder_hidden)
+
+        # Normalise or dropout the output of first layer if it is specified
+        if self.first_bn is not None:
+            lstm_out = lstm_out.transpose(1,2)
+            lstm_out = self.first_bn(lstm_out)
+            lstm_out = lstm_out.transpose(1,2)
+        if self.first_ln is not None:
+            lstm_out = self.first_ln(lstm_out)
+        if self.first_do is not None:
+            lstm_out = self.first_do(lstm_out)
+            
+        # Apply the other layers
+        for lstm, bn_layer, ln_layer, do_layer in zip(self.lstm_layers, self.bn_layers, self.ln_layers, self.dropout_layers):
+            
+            lstm_out, decoder_hidden = lstm(lstm_out, decoder_hidden)
+            # Apply the batch,layer norm and dropout if specified
+            if bn_layer is not None:
+                lstm_out = lstm_out.transpose(1,2)
+                lstm_out = bn_layer(lstm_out)
+                lstm_out = lstm_out.transpose(1,2)
+            if ln_layer is not None:
+                lstm_out = ln_layer(lstm_out)
+            if self.monte_carlo:
+                lstm_out = do_layer(lstm_out)
+            
+
+        
+        # For the basic LSTM just return the final prediction
+        x = self.fc(lstm_out[:, -1, :])
+        
+        if self.monte_carlo: # Dropout from the output
+        # Pass the output 
+            x = nn.Dropout(p=self.config.dropout)(lstm_out[:, -1, :])
+            out = self.fc(x)
+            # shape of out is [batch_size, output_dim], reshape to [batch, horizon, features]
+            return out.view(-1, self.horizon, self.output_dim)
+            
+        
+        if self.var:
+            # Pass the log variance through the exponential function to get the variance
+            # from the fully connected layer
+            var = torch.exp(self.fc_logvar(lstm_out[:, -1, :]))
+            x = self.fc(lstm_out[:, -1, :])
+            return x.view(-1, self.horizon, self.output_dim), var.view(-1, self.horizon, self.output_dim)
+        
+        if self.quantiles is not None:
+            # Output the quantiles
+            return x.view(-1, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        return x.view(-1, self.horizon, self.output_dim)
+        
 
 # Combined Encoder-Decoder Model (Can be used in combination with other models!)
 
 class EncoderDecoder(BaseModel):
     
-    def __init__(self, config: LSTMConfig, input_dim: int, output_dim: int):
-        super.__init__(config)
-        self.input_dim = input_dim
-        self.output_dim = output_dim
+    def __init__(self, config: LSTMConfig, encoder_model: BaseModel, decoder_model: BaseModel):
+        super().__init__(config)
+        self.encoder_model = encoder_model
+        self.decoder_model = decoder_model
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        
+        # Encoder forward pass
+        encoder_output, encoder_hidden = self.encoder_model(x)
+        
+        # Decoder forward pass using encoder's hidden state
+        decoder_output = self.decoder_model(encoder_output, encoder_hidden)
+        
+        return decoder_output
+        
     
 
 # https://colab.research.google.com/github/PawaritL/BayesianLSTM/blob/master/Energy_Consumption_Predictions_with_Bayesian_LSTMs_in_PyTorch.ipynb#scrollTo=OgWyOffPbO0b
