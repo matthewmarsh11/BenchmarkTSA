@@ -19,7 +19,7 @@ def is_pareto_efficient(costs):
     return is_efficient
 
 model_folder = '/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/models'
-model_files = [f for f in os.listdir(model_folder) if f.startswith('CSTR_NLL')]
+model_files = [f for f in os.listdir(model_folder) if f.startswith('CSTR')]
 
 means = []
 vars = []
