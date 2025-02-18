@@ -46,7 +46,8 @@ training_config = TrainingConfig(
     factor = 0.8,
     patience = 10,
     delta = 0.1,
-    train_test_split = 0.8,
+    train_test_split = 0.6,
+    test_val_split = 0.8,
     device = 'cuda' if torch.cuda.is_available() else 'cpu',
 )
 
@@ -65,7 +66,7 @@ training_bounds = {
 
 LSTM_Config = LSTMConfig(
     hidden_dim = 64,
-    num_layers=4,
+    num_layers=8,
     dropout = 0.2,
     bidirectional=False,
     norm_type = None,
@@ -145,7 +146,7 @@ model_dict = {
 
 # Iterate through each defined model to optimise
 
-model = MLR
+model = CNN
 model_config = model_dict[model][0]
 bounds = model_dict[model][1]
 
@@ -163,7 +164,7 @@ optimiser = ModelOptimisation(
     converter = CSTRConverter,
     data_processor = DataProcessor,
     trainer_class = ModelTrainer,
-    iters = 50,
+    iters = 10,
     quantiles = None, # Define how to quantify uncertainty
     monte_carlo = None,
     variance = True,
