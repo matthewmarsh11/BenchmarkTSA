@@ -15,7 +15,8 @@ class TrainingConfig:
     factor: float
     patience: int
     delta: float
-    train_test_split: float = 0.8
+    train_test_split: float = 0.6
+    test_val_split: float = 0.8
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass
