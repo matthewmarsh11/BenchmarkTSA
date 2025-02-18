@@ -280,24 +280,26 @@ class EncoderLSTM(BaseModel):
 
 class DecoderLSTM(BaseModel):
     
-    def __init__(self, config: LSTMConfig, output_dim: int, horizon: int, quantiles: Optional[List[float]] = None, monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
+    def __init__(self, config: LSTMConfig, hidden_dim: int, output_dim: int, horizon: int, quantiles: Optional[List[float]] = None, monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
         super().__init__(config)
         
+        self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.horizon = horizon
+        
         
         self.quantiles = quantiles
         self.monte_carlo = monte_carlo
         self.var = var
 
-        lstm_output_dim = self.config.hidden_dim * 2 if self.config.bidirectional else self.config.hidden_dim
+        lstm_output_dim = self.hidden_dim * 2 if self.config.bidirectional else self.hidden_dim
 
         self.BatchNorm = nn.BatchNorm1d(lstm_output_dim) if getattr(self.config.norm_type, 'batch', False) else None
         self.LayerNorm = nn.LayerNorm(lstm_output_dim) if getattr(self.config.norm_type, 'layer', False) else None
         
         # Normalise the first layer if BatchNorm or LayerNorm is specified
-        self.input_bn = nn.BatchNorm1d(self.config.hidden_dim) if getattr(self.config.norm_type, 'batch', False) else None
-        self.input_ln = nn.LayerNorm(self.config.hidden_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.input_bn = nn.BatchNorm1d(self.hidden_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.input_ln = nn.LayerNorm(self.hidden_dim) if getattr(self.config.norm_type, 'layer', False) else None
         self.input_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
 
         # If quantiles are specified, initialise the quantile model
@@ -307,7 +309,7 @@ class DecoderLSTM(BaseModel):
         # Build the first LSTM Layer input dim -> hidden dim
         
         self.first_lstm = nn.LSTM(
-            self.config.hidden_dim, 
+            self.hidden_dim, 
             self.config.hidden_dim, 
             num_layers=1,
             batch_first=True, 
