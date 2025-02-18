@@ -190,20 +190,26 @@ class DataProcessor:
         y_tensor = torch.FloatTensor(y)
 
         # Split data
-        split_idx = int(len(X_tensor) * self.config.train_test_split)
-        X_train = X_tensor[:split_idx]
-        X_test = X_tensor[split_idx:]
-        y_train = y_tensor[:split_idx]
-        y_test = y_tensor[split_idx:]
-
+        tt_idx = int(len(X_tensor) * self.config.train_test_split)
+        tv_idx = int(len(X_tensor) * self.config.test_val_split)
+        
+        X_train = X_tensor[:tt_idx]
+        X_test = X_tensor[tt_idx:tv_idx]
+        X_val = X_tensor[tv_idx:]
+        y_train = y_tensor[:tt_idx]
+        y_test = y_tensor[tt_idx:tv_idx]
+        y_val = y_tensor[tv_idx:]
+        
         # Create dataloaders
         train_dataset = TensorDataset(X_train, y_train)
         test_dataset = TensorDataset(X_test, y_test)
+        val_dataset = TensorDataset(X_val, y_val)
 
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
         test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size, shuffle=False)
+        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
 
-        return train_loader, test_loader, X_train, X_test, y_train, y_test, X_tensor, y_tensor
+        return train_loader, test_loader, val_loader, X_train, X_test, X_val, y_train, y_test, y_val, X_tensor, y_tensor
 
     def rescale_predictions(self, scaled_mean: np.ndarray, scaled_variance: np.ndarray) -> ScalingResult:
         """
@@ -414,12 +420,12 @@ class ModelTrainer:
         self.device = torch.device(config.device)
         self.model.to(self.device)
 
-    def train(self, train_loader: DataLoader, test_loader: DataLoader, 
+    def train(self, train_loader: DataLoader, test_loader: DataLoader, val_loader: DataLoader,
             criterion: nn.Module) -> Dict[str, List[float]]:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
         early_stopping = EarlyStopping(self.config)
-        history = {'train_loss': [], 'test_loss': [], 'avg_loss': []}
+        history = {'train_loss': [], 'test_loss': [], 'val_loss': [], 'avg_loss': []}
 
         for epoch in range(self.config.num_epochs):
             # Training
@@ -433,17 +439,21 @@ class ModelTrainer:
             self.model.eval()
             if isinstance(criterion, nn.GaussianNLLLoss):
                 test_loss = self._NLL_validate_epoch(test_loader, criterion)
+                val_loss = self._NLL_validate_epoch(val_loader, criterion)
             else:
                 test_loss = self._validate_epoch(test_loader, criterion)
+                val_loss = self._validate_epoch(val_loader, criterion)
             
             # Calculate average losses
             avg_train_loss = train_loss / len(train_loader)
             avg_test_loss = test_loss / len(test_loader)
+            avg_val_loss = val_loss / len(val_loader)
             avg_loss = (avg_train_loss + avg_test_loss) / 2
             
             # Update history
             history['train_loss'].append(avg_train_loss)
             history['test_loss'].append(avg_test_loss)
+            history['val_loss'].append(avg_val_loss)
             history['avg_loss'].append(avg_loss)
             
             # Use average loss for scheduler
@@ -451,7 +461,8 @@ class ModelTrainer:
             
             if (epoch + 1) % 10 == 0:
                 print(f'Epoch [{epoch+1}/{self.config.num_epochs}], '
-                    f'Train Loss: {avg_train_loss:.4f}, Test Loss: {avg_test_loss:.4f}, '
+                    f'Train Loss: {avg_train_loss:.4f}, Test Loss: {avg_test_loss:.4f}, ' 
+                    f'Val Loss: {avg_val_loss:.4f}'
                     f'Avg Loss: {avg_loss:.4f}')
                 
                 early_stopping(avg_loss, self.model)  # Use average loss for early stopping
@@ -514,16 +525,18 @@ class Visualizer:
     def plot_preds(preds: Union[np.ndarray, Dict[float, np.ndarray]],    
                          noisy_data, noiseless_data: np.ndarray, sequence_length: int,
                          time_horizon: int, feature_names: list, num_simulations: int, 
-                         train_test_split: float,
+                         train_test_split: float, test_val_split: float,
                          vars: Optional[np.ndarray] = None):
         
         # If split the predictions into the train set and test set
         # If it is a dictionary (quantiles) need to account for this
         if isinstance(preds, np.ndarray):
-            split_idx = int(train_test_split * len(preds))
+            tt_idx = int(train_test_split * len(preds))
+            tv_idx = int(test_val_split * len(preds))
         else:
-            split_idx = int(train_test_split * len(preds[0.5]))
-        
+            tt_idx = int(train_test_split * len(preds[0.5]))
+            tv_idx = int(test_val_split * len(preds[0.5]))
+                    
         pred_new = None
         
         feature_names = [f"{feature} Sim {i+1}" for feature in feature_names for i in range(num_simulations)]
@@ -532,7 +545,8 @@ class Visualizer:
         
         if isinstance(preds, dict):
             # Iterate through each quantile key and split the predictions
-            split_idx = int(train_test_split * len(preds[0.5]))
+            tt_idx = int(train_test_split * len(preds[0.5]))
+            tv_idx = int(test_val_split * len(preds[0.5]))
 
             pred_new = preds
             preds = preds[0.5]
@@ -543,11 +557,14 @@ class Visualizer:
             
             
             # Plot training predictions and ground truth
-            plt.plot(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
-                preds[:split_idx, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
-            test_offset = sequence_length + len(preds[:split_idx, i])
-            plt.plot(range(test_offset, test_offset + len(preds[split_idx:, i])), 
-                    preds[split_idx:, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
+            plt.plot(range(sequence_length, sequence_length + len(preds[:tt_idx, i])),
+                preds[:tt_idx, i], label=f'{sim} Train Predictions', color='blue', alpha=0.7)
+            test_offset = sequence_length + len(preds[:tt_idx, i])
+            plt.plot(range(test_offset, test_offset + len(preds[tt_idx:tv_idx, i])), 
+                    preds[tt_idx:tv_idx, i], label=f'{sim} Test Predictions', color='red', alpha=0.7)
+            val_offset = sequence_length + len(preds[:tt_idx, i]) + len(preds[tt_idx:tv_idx, i])
+            plt.plot(range(val_offset, val_offset + len(preds[tv_idx:, i])), 
+                    preds[tv_idx:, i], label=f'{sim} Val Predictions', color='cyan', alpha=0.7)
             
             plt.plot(noisy_data[:, i], label=f'{sim} Noisy Simulation', color='green', alpha=0.7)
             plt.plot(noiseless_data[:, i], label=f'{sim} Noiseless Data', color='black', linestyle = 'dashed', alpha=0.7)
@@ -558,23 +575,26 @@ class Visualizer:
             plt.legend(loc='upper left', bbox_to_anchor=(1.05, 1), ncol=1)
             
             if vars is not None:
-                plt.fill_between(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
-                                preds[:split_idx, i] - np.sqrt(vars[:split_idx, i]), preds[:split_idx, i] + np.sqrt(vars[:split_idx, i]),
+                plt.fill_between(range(sequence_length, sequence_length + len(preds[:tt_idx, i])),
+                                preds[:tt_idx, i] - np.sqrt(vars[:tt_idx, i]), preds[:tt_idx, i] + np.sqrt(vars[:tt_idx, i]),
                                 color='blue', alpha=0.2, edgecolor = 'None',label='Train Uncertainty')
-                plt.fill_between(range(test_offset, test_offset + len(preds[split_idx:, i])),
-                                preds[split_idx:, i] - np.sqrt(vars[split_idx:, i]), preds[split_idx:, i] + np.sqrt(vars[split_idx:, i]),
+                plt.fill_between(range(test_offset, test_offset + len(preds[tt_idx:tv_idx, i])),
+                                preds[tt_idx:tv_idx, i] - np.sqrt(vars[tt_idx:tv_idx, i]), preds[tt_idx:tv_idx, i] + np.sqrt(vars[tt_idx:tv_idx, i]),
                                 color='red', alpha=0.2, edgecolor = 'None', label='Test Uncertainty')
-
+                plt.fill_between(range(val_offset, val_offset + len(preds[tv_idx:, i])),
+                                preds[tv_idx:, i] - np.sqrt(vars[tv_idx:, i]), preds[tv_idx:, i] + np.sqrt(vars[tv_idx:, i]),
+                                color='cyan', alpha=0.2, edgecolor = 'None', label='Val Uncertainty')
             # Plot the dictionary of quantiles as the uncertainty
             if pred_new:
                 keys = pred_new.keys()
                 max_key = max(keys)
                 min_key = min(keys)
-                plt.fill_between(range(sequence_length, sequence_length + len(preds[:split_idx, i])),
-                                pred_new[min_key][:split_idx, i], pred_new[max_key][:split_idx, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
-                plt.fill_between(range(test_offset, test_offset + len(preds[split_idx:, i])), 
-                                pred_new[min_key][split_idx:, i], pred_new[max_key][split_idx:, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
-           
+                plt.fill_between(range(sequence_length, sequence_length + len(preds[:tt_idx, i])),
+                                pred_new[min_key][:tt_idx, i], pred_new[max_key][:tt_idx, i], color='blue', alpha=0.2, edgecolor = 'None', label='Train Uncertainty')
+                plt.fill_between(range(test_offset, test_offset + len(preds[tt_idx:tv_idx, i])), 
+                                pred_new[min_key][tt_idx:tv_idx, i], pred_new[max_key][tt_idx:tv_idx, i], color='red', alpha=0.2, edgecolor = 'None',label='Test Uncertainty')
+                plt.fill_between(range(val_offset, val_offset + len(preds[tv_idx:, i])), 
+                                pred_new[min_key][tv_idx:, i], pred_new[max_key][tv_idx:, i], color='cyan', alpha=0.2, edgecolor = 'None',label='Val Uncertainty')
             plt.tight_layout()
             plt.show()   
     
@@ -1052,15 +1072,15 @@ class ModelOptimisation:
         features, targets = self.converter.convert(simulation_results)        
         data_processor = self.data_processor(self.train_config, features, targets)
 
-        (train_loader, test_loader, self.X_train, self.X_test,
-        self.y_train, self.y_test, self.X, self.y) = data_processor.prepare_data()
+        (train_loader, test_loader, val_loader, self.X_train, self.X_test, self.X_val,
+        self.y_train, self.y_test, self.y_val, self.X, self.y) = data_processor.prepare_data()
         
             
         self.model, criterion, use_monte_carlo = self.initialize_model_and_criterion()
         
         # Train the model
         self.trainer = self.trainer_class(self.model, self.train_config)
-        self.model, _, average_loss = self.trainer.train(train_loader, test_loader, criterion)
+        self.model, _, average_loss = self.trainer.train(train_loader, test_loader, val_loader, criterion)
         
         if np.isnan(average_loss):
             average_loss = 1e6
@@ -1405,7 +1425,7 @@ class ConformalQuantile:
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500)
+    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500, noise_percentage=0.001)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     
     
@@ -1466,8 +1486,8 @@ def main():
     
     data_processor = DataProcessor(training_config, features, targets)
     # Prepare data
-    (train_loader, test_loader, X_train, X_test, 
-     y_train, y_test, X, y) = data_processor.prepare_data()
+    (train_loader, test_loader, val_loader, X_train, X_test, X_val,  
+     y_train, y_test, y_val, X, y) = data_processor.prepare_data()
 
     # (train_loader, test_loader, X_train, X_test, 
     #  y_train, y_test) = data_processor.prepare_data_ANNs(features, targets)
@@ -1479,6 +1499,11 @@ def main():
     #     var = True
     # )
     quantiles = [0.25, 0.5, 0.75]
+    
+    encoder = EncoderLSTM(LSTM_Config, input_dim=X_train.shape[2])
+    decoder = DecoderLSTM(LSTM_Config, output_dim=y_train.shape[2], horizon = training_config.horizon)
+    
+    model = EncoderDecoder(LSTM_Config, encoder, decoder)
 
     # y_train of shape (time_steps, horizon, features)
     model = LSTM(
@@ -1486,7 +1511,7 @@ def main():
         input_dim=X_train.shape[2],
         output_dim=y_train.shape[2],
         horizon = training_config.horizon,
-        quantiles = quantiles,
+        var = True,
     )
     
     # print('X_train shape:', X_train.shape[2])
@@ -1514,12 +1539,12 @@ def main():
 
     # Train model
     # criterion = nn.MSELoss()
-    criterion = QuantileLoss(quantiles)
+    # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    # criterion = nn.GaussianNLLLoss()
+    criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
-    model, history, avg_loss = trainer.train(train_loader, test_loader, criterion)
+    model, history, avg_loss = trainer.train(train_loader, test_loader, val_loader, criterion)
     # Make predictions
     model.eval()
     with torch.no_grad():
@@ -1537,9 +1562,9 @@ def main():
     # test_pred = data_processor.quantile_invert(test_pred, quantiles)
     
     with torch.no_grad():
-        pred = model(X.to(training_config.device)).cpu().numpy()
+        preds, vars = model(X.to(training_config.device))
     print('gau')
-    preds = data_processor.quantile_invert(pred, quantiles)
+    # preds = data_processor.quantile_invert(pred, quantiles)
     
     # rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
     # means = rescaled_pred[0]
@@ -1564,7 +1589,8 @@ def main():
     visualizer.plot_preds(preds, features, noiseless_results,
                                 sequence_length=sequence_length, time_horizon=training_config.horizon, 
                                 feature_names = feature_names, num_simulations=10, train_test_split=training_config.train_test_split,
-    )
+                                test_val_split=training_config.test_val_split),
+    
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
