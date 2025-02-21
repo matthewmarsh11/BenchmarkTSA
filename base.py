@@ -57,6 +57,7 @@ class TFConfig:
     dim_feedforward: int
     dropout: float = 0.2
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
 
 @dataclass
 class MLRConfig:
@@ -70,6 +71,17 @@ class BaseModel(nn.Module, ABC):
         super().__init__()
         self.config = config
 
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pass
+    
+class BaseEncoderDecoder(nn.Module, ABC):
+    """Abstract base class for all encoder-decoder models"""
+    def __init__(self, encoder_config, decoder_config):
+        super().__init__()
+        self.encoder_config = encoder_config
+        self.decoder_config = decoder_config
+        
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pass
