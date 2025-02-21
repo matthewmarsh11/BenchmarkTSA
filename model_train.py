@@ -16,29 +16,18 @@ from utils import *
 np.random.seed(42)
 torch.manual_seed(42)
 
-# Create simulation
+features_path = 'datasets/cstr_sim_features.csv'
+targets_path = 'datasets/cstr_sim_targets.csv'
 
-simulation_config = SimulationConfig(
-    n_simulations=10,
-    T = 100, # Change the number of time steps
-    tsim = 500,
-    noise_percentage = 0.01
-    )
-
-simulator = CSTRSimulator(simulation_config) # Change this for different case studies
-simulation_results, noiseless_simulation = simulator.run_multiple_simulations()
-
-# Convert simulation results to feed into model
-
-converter = CSTRConverter() # Change this for different case studies
-features, targets = converter.convert(simulation_results)
-noiseless_results, _ = converter.convert(noiseless_simulation) # To compare model to noiseless simulation
+noiseless = pd.read_csv('datasets/cstr_noiseless_results.csv')
+features = pd.read_csv(features_path)
+targets = pd.read_csv(targets_path)
 
 # Initial model and training configurations
 
 training_config = TrainingConfig(
     batch_size = 30,
-    num_epochs = 1000,
+    num_epochs = 100,
     learning_rate = 0.001,
     time_step = 15,
     horizon = 5,
@@ -53,10 +42,10 @@ training_config = TrainingConfig(
 
 training_bounds = {
     
-        'batch_size': (2, len(features)) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'batch_size': (2, len(features)),
         'num_epochs': (50, 1500),
         'learning_rate': (0.0001, 0.1),
-        'time_step': (2, 20) if isinstance(simulator, CSTRSimulator) else (2, 10),
+        'time_step': (2, 20),
         'horizon': (3, 10),
         'weight_decay': (1e-6, 0.1),
         'factor': (0.1, 0.99),
@@ -156,11 +145,11 @@ quantiles = [0.1, 0.5, 0.9]
 
 optimiser = ModelOptimisation(
     model_class= model,
-    sim_config = simulation_config,
     train_config = training_config,
     model_config = model_config,
     config_bounds=bounds,
-    simulator = CSTRSimulator,
+    features_path = features_path,
+    targets_path = targets_path,
     converter = CSTRConverter,
     data_processor = DataProcessor,
     trainer_class = ModelTrainer,

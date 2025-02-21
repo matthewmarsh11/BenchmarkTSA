@@ -1,8 +1,11 @@
 import torch
 from models import *
 from utils import *
-from simulation import *
+import pandas as pd
 
+noiseless = pd.read_csv('datasets/cstr_noiseless_results.csv')
+features = pd.read_csv('datasets/cstr_sim_features.csv')
+targets = pd.read_csv('datasets/cstr_sim_targets.csv')
 
 
 path = "/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/models/CSTR_NLL_<class 'models.LSTM'>_model_45.pth"

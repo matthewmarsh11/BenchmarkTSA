@@ -1,12 +1,13 @@
 from Bioprocess_Sim import *
 from CSTR_Sim import *
 from utils import *
+import pandas as pd
 
 # Simulate the CSTR 10 times, with 5000 timesteps over 1000 second period
-CSTR_Config = SimulationConfig(n_simulations=10,
+CSTR_Config = SimulationConfig(n_simulations=10000,
                                 T = 101,
                                 tsim = 500,
-                                noise_percentage=0.001,
+                                noise_percentage=0.01,
                             ) 
 simulator = CSTRSimulator(CSTR_Config)
 simulation_results, noiseless_sim = simulator.run_multiple_simulations()
@@ -18,6 +19,14 @@ converter = CSTRConverter()
 features, targets = converter.convert(simulation_results)
 noiseless_results, _ = converter.convert(noiseless_sim)
 
+# Save the features and targets to CSV files
+features_df = pd.DataFrame(features)
+targets_df = pd.DataFrame(targets)
+noiseless_results_df = pd.DataFrame(noiseless_results)
+
+features_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/cstr_sim_features.csv', index=False)
+targets_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/cstr_sim_targets.csv', index=False)
+noiseless_results_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/noiseless_results.csv', index=False)
 # # Define a preliminary training configuration for the model
 # # Data processing uses an initial lookback region of 5 timesteps to predict 1 in the future 
 # # with an 80% train test split and a batch size of 4
