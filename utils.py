@@ -919,20 +919,19 @@ class ModelEvaluation:
 
 class ModelOptimisation:
     """Class for optimising parameters and hyperparameters of the model"""
-    def __init__(self, model_class: BaseModel, sim_config: SimulationConfig, 
-                train_config: TrainingConfig, model_config: Union[CNNConfig, LSTMConfig],
+    def __init__(self, model_class: BaseModel, train_config: TrainingConfig, model_config: Union[CNNConfig, LSTMConfig],
                 config_bounds: Dict[str, Union[Tuple[float, float], List[Tuple[float, float]]]], 
-                simulator, converter: SimulationConverter, data_processor: DataProcessor,
+                features_path: str, targets_path: str, converter: SimulationConverter, data_processor: DataProcessor,
                 trainer_class: ModelTrainer, iters: int = 100, quantiles: Optional[List[float]] = None, 
                 monte_carlo: Optional[classmethod] = None, variance: Optional[bool] = None):
         
         self.model_class = model_class
-        self.sim_config = sim_config
         self.config_bounds = config_bounds
         self.train_config = train_config
         self.model_config = model_config
+        self.features_path = features_path
+        self.targets_path = targets_path
         self.data_processor = data_processor
-        self.simulator = simulator(self.sim_config)
         self.trainer_class = trainer_class
         self.converter = converter()
         self.iters = iters
@@ -1068,8 +1067,8 @@ class ModelOptimisation:
                 values = [int(v) for v in values]
                 setattr(self.model_config, name, values)
 
-        simulation_results, _ = self.simulator.run_multiple_simulations()
-        features, targets = self.converter.convert(simulation_results)        
+        features = pd.read_csv(self.features_path)
+        targets = pd.read_csv(self.targets_path)      
         data_processor = self.data_processor(self.train_config, features, targets)
 
         (train_loader, test_loader, val_loader, self.X_train, self.X_test, self.X_val,
@@ -1425,13 +1424,13 @@ class ConformalQuantile:
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500, noise_percentage=0.001)
+    CSTR_sim_config = SimulationConfig(n_simulations=100, T=101, tsim=500, noise_percentage=0.01)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     
     
     training_config = TrainingConfig(
         batch_size=48,
-        num_epochs=20,
+        num_epochs=200,
         learning_rate=0.0031,
         time_step=10,
         horizon=5,
@@ -1439,6 +1438,8 @@ def main():
         factor=0.1,
         patience=58,
         delta = 0.042,
+        train_test_split=0.6,
+        test_val_split=0.8,
     )
     LSTM_Config = LSTMConfig(
         hidden_dim = 64,
@@ -1500,19 +1501,36 @@ def main():
     # )
     quantiles = [0.25, 0.5, 0.75]
     
-    encoder = EncoderLSTM(LSTM_Config, input_dim=X_train.shape[2])
-    decoder = DecoderLSTM(LSTM_Config, output_dim=y_train.shape[2], horizon = training_config.horizon)
+    Encoder_Config = LSTMConfig(
+        hidden_dim = 64,
+        num_layers=4,
+        dropout = 0.2,
+        bidirectional=True,
+        norm_type = 'layer',
+    )
     
-    model = EncoderDecoder(LSTM_Config, encoder, decoder)
+    Decoder_Config = LSTMConfig(
+        hidden_dim = 64,
+        num_layers=4,
+        dropout = 0.2,
+        bidirectional=True,
+        norm_type = 'layer',
+    )
+    
+    encoder = EncoderLSTM(Encoder_Config, input_dim=X_train.shape[2])
+    decoder = DecoderLSTM(Decoder_Config, hidden_dim = Encoder_Config.hidden_dim * 2 if Encoder_Config.bidirectional else Encoder_Config.hidden_dim,
+                          output_dim=y_train.shape[2], horizon = training_config.horizon)
+    
+    model = EncoderDecoder(Encoder_Config, Decoder_Config, encoder, decoder)
 
     # y_train of shape (time_steps, horizon, features)
-    model = LSTM(
-        config=LSTM_Config,
-        input_dim=X_train.shape[2],
-        output_dim=y_train.shape[2],
-        horizon = training_config.horizon,
-        var = True,
-    )
+    # model = LSTM(
+    #     config=LSTM_Config,
+    #     input_dim=X_train.shape[2],
+    #     output_dim=y_train.shape[2],
+    #     horizon = training_config.horizon,
+    #     var = True,
+    # )
     
     # print('X_train shape:', X_train.shape[2])
     # print('outptu_dim:', y_train.shape[1])
@@ -1538,10 +1556,10 @@ def main():
     # )
 
     # Train model
-    # criterion = nn.MSELoss()
+    criterion = nn.MSELoss()
     # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    criterion = nn.GaussianNLLLoss()
+    # criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, val_loader, criterion)
@@ -1562,14 +1580,17 @@ def main():
     # test_pred = data_processor.quantile_invert(test_pred, quantiles)
     
     with torch.no_grad():
-        preds, vars = model(X.to(training_config.device))
-    print('gau')
+        preds = model(X)
     # preds = data_processor.quantile_invert(pred, quantiles)
     
-    # rescaled_pred = data_processor.revert_sequences(train_pred, test_pred, train_var, test_var)
+    mean = preds.detach().numpy()
+    means = data_processor.reconstruct_sequence(mean, False)
+    # var = vars.detach().numpy()
+    # var = data_processor.reconstruct_sequence(var, True)
+    means = data_processor.target_scaler.inverse_transform(means)
+    # rescaled_pred = data_processor.rescale_predictions(mean, var)
     # means = rescaled_pred[0]
     # variances = rescaled_pred[1]
-    
     
     # mc_predictor = MC_Prediction(model, num_samples=100)
     # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
@@ -1586,11 +1607,14 @@ def main():
     action_names = ['inlet temp', 'feed conc', 'coolant temp']
     visualizer = Visualizer()
     sequence_length = training_config.time_step
-    visualizer.plot_preds(preds, features, noiseless_results,
-                                sequence_length=sequence_length, time_horizon=training_config.horizon, 
-                                feature_names = feature_names, num_simulations=10, train_test_split=training_config.train_test_split,
-                                test_val_split=training_config.test_val_split),
-    
+    time_horizon = training_config.horizon
+    # For simplicity we will plot the first simulation
+    visualizer.plot_preds(means, features,
+                                noiseless_results,
+                                sequence_length,
+                                time_horizon, feature_names,
+                                num_simulations = 10,
+                                train_test_split = 0.6, test_val_split = 0.8)
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
