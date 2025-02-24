@@ -1517,12 +1517,33 @@ def main():
         norm_type = 'layer',
     )
     
-    encoder = EncoderLSTM(Encoder_Config, input_dim=X_train.shape[2])
-    decoder = DecoderLSTM(Decoder_Config, hidden_dim = Encoder_Config.hidden_dim * 2 if Encoder_Config.bidirectional else Encoder_Config.hidden_dim,
-                          output_dim=y_train.shape[2], horizon = training_config.horizon)
+    # encoder = EncoderLSTM(Encoder_Config, input_dim=X_train.shape[2])
+    # decoder = DecoderLSTM(Decoder_Config, hidden_dim = Encoder_Config.hidden_dim * 2 if Encoder_Config.bidirectional else Encoder_Config.hidden_dim,
+    #                       output_dim=y_train.shape[2], horizon = training_config.horizon)
     
-    model = EncoderDecoder(Encoder_Config, Decoder_Config, encoder, decoder)
+    # model = EncoderDecoder(Encoder_Config, Decoder_Config, encoder, decoder)
 
+    encoder_config = TFConfig(
+        num_layers = 4,
+        hidden_dim = 64,
+        d_model = 64,
+        num_heads=4,
+        dim_feedforward=128,
+        dropout=0.2,
+    )
+    
+    decoder_config = TFConfig(
+        num_layers = 4,
+        hidden_dim = 64,
+        d_model = 64,
+        num_heads=4,
+        dim_feedforward=128,
+        dropout=0.2,
+    )
+    
+    model = EcDcTransformer(encoder_config, decoder_config, input_dim=X_train.shape[2], horizon = training_config.horizon,
+                            output_dim=y_train.shape[2])
+    
     # y_train of shape (time_steps, horizon, features)
     # model = LSTM(
     #     config=LSTM_Config,

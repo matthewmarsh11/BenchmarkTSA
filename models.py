@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from base import TrainingConfig, BaseModel, BaseEncoderDecoder, LSTMConfig, CNNConfig, MLPConfig
+from base import TrainingConfig, BaseModel, BaseEncoderDecoder, LSTMConfig, CNNConfig, MLPConfig, TFConfig
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
@@ -811,21 +811,15 @@ class TransformerEncoder(BaseModel):
 
 class EcDcTransformer(BaseEncoderDecoder):
     """Encoder-Decoder Transformer model"""
-    def __init__(self, 
-        input_size: int,
+    def __init__(self,
+        encoder_config: TFConfig,
+        decoder_config: TFConfig,
+        input_dim: int,
         horizon: int,
-        batch_first: bool,
-        out_seq_len: int=58,
-        dim_val: int=512,  
-        n_encoder_layers: int=4,
-        n_decoder_layers: int=4,
-        n_heads: int=8,
-        dropout_encoder: float=0.2, 
-        dropout_decoder: float=0.2,
-        dropout_pos_enc: float=0.1,
-        dim_feedforward_encoder: int=2048,
-        dim_feedforward_decoder: int=2048,
-        num_predicted_features: int=1
+        output_dim: int,
+        var: Optional[bool] = None,
+        monte_carlo: Optional[bool] = None,
+        quantiles: Optional[List] = None,
         ): 
 
         """
@@ -851,43 +845,51 @@ class EcDcTransformer(BaseEncoderDecoder):
                                     model, num_predicted_features should be 2.
         """
 
-        super().__init__() 
-
-        self.dec_seq_len = dec_seq_len
-
-        #print("input_size is: {}".format(input_size))
-        #print("dim_val is: {}".format(dim_val))
+        super().__init__(encoder_config, decoder_config) 
+        self.input_dim = input_dim
+        self.horizon = horizon
+        self.output_dim = output_dim
+        self.var = var
+        self.monte_carlo = monte_carlo
+        self.quantiles = quantiles
+        
+        if self.quantiles:
+            self.output_dim = self.output_dim * len(self.quantiles)
+            
+        self.input_bn = nn.BatchNorm1d(self.input_dim) if getattr(self.encoder_config.norm_type, 'batch', False) else None
+        self.input_ln = nn.LayerNorm(self.input_dim) if getattr(self.encoder_config.norm_type, 'layer', False) else None
+        self.input_do = nn.Dropout(p = self.encoder_config.dropout) if self.monte_carlo else None
+        
+        self.ec_norm = nn.BatchNorm1d(self.encoder_config.d_model) if getattr(self.encoder_config.norm_type, 'batch', False) else nn.LayerNorm(self.encoder_config.d_model) if getattr(self.encoder_config.norm_type, 'layer', False) else None
+        self.dec_norm = nn.BatchNorm1d(self.decoder_config.d_model) if getattr(self.decoder_config.norm_type, 'batch', False) else nn.LayerNorm(self.decoder_config.d_model) if getattr(self.decoder_config.norm_type, 'layer', False) else None
 
         # Creating the three linear layers needed for the model
         self.encoder_input_layer = nn.Linear(
-            in_features=input_size, 
-            out_features=dim_val 
+            in_features=input_dim, 
+            out_features=self.encoder_config.d_model 
             )
 
         self.decoder_input_layer = nn.Linear(
-            in_features=num_predicted_features,
-            out_features=dim_val
+            in_features=self.encoder_config.d_model,
+            out_features=self.decoder_config.d_model,
             )  
         
         self.linear_mapping = nn.Linear(
-            in_features=dim_val, 
-            out_features=num_predicted_features
+            in_features=self.decoder_config.d_model, 
+            out_features=self.output_dim
             )
 
         # Create positional encoder
-        self.positional_encoding_layer = pe.PositionalEncoder(
-            d_model=dim_val,
-            dropout=dropout_pos_enc
-            )
+        self.pos_encoder = PositionalEncoding(self.encoder_config.d_model)
 
         # The encoder layer used in the paper is identical to the one used by
         # Vaswani et al (2017) on which the PyTorch module is based.
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim_val, 
-            nhead=n_heads,
-            dim_feedforward=dim_feedforward_encoder,
-            dropout=dropout_encoder,
-            batch_first=batch_first
+            d_model=self.encoder_config.d_model, 
+            nhead=self.encoder_config.num_heads,
+            dim_feedforward=self.encoder_config.dim_feedforward,
+            dropout=self.encoder_config.dropout,
+            batch_first=True
             )
 
         # Stack the encoder layers in nn.TransformerDecoder
@@ -897,16 +899,16 @@ class EcDcTransformer(BaseEncoderDecoder):
         # (https://github.com/pytorch/pytorch/issues/24930).
         self.encoder = nn.TransformerEncoder(
             encoder_layer=encoder_layer,
-            num_layers=n_encoder_layers, 
-            norm=None
+            num_layers=self.encoder_config.num_layers, 
+            norm=self.ec_norm
             )
 
         decoder_layer = nn.TransformerDecoderLayer(
-            d_model=dim_val,
-            nhead=n_heads,
-            dim_feedforward=dim_feedforward_decoder,
-            dropout=dropout_decoder,
-            batch_first=batch_first
+            d_model=self.decoder_config.d_model,
+            nhead=self.decoder_config.num_heads,
+            dim_feedforward=self.decoder_config.dim_feedforward,
+            dropout=self.decoder_config.dropout,
+            
             )
 
         # Stack the decoder layers in nn.TransformerDecoder
@@ -916,11 +918,11 @@ class EcDcTransformer(BaseEncoderDecoder):
         # (https://github.com/pytorch/pytorch/issues/24930).
         self.decoder = nn.TransformerDecoder(
             decoder_layer=decoder_layer,
-            num_layers=n_decoder_layers, 
-            norm=None
+            num_layers=self.decoder_config.num_layers, 
+            norm=self.dec_norm
             )
 
-    def forward(self, src: torch.Tensor, tgt: torch.Tensor, src_mask: torch.Tensor=None, 
+    def forward(self, x_enc: torch.Tensor, x_dec: torch.Tensor, x_mask: torch.Tensor=None, 
                 tgt_mask: torch.Tensor=None) -> torch.Tensor:
         """
         Returns a tensor of shape:
@@ -943,48 +945,51 @@ class EcDcTransformer(BaseEncoderDecoder):
 
         #print("From model.forward(): Size of src as given to forward(): {}".format(src.size()))
         #print("From model.forward(): tgt size = {}".format(tgt.size()))
-
-        # Pass throguh the input layer right before the encoder
-        src = self.encoder_input_layer(src) # src shape: [batch_size, src length, dim_val] regardless of number of input features
-        #print("From model.forward(): Size of src after input layer: {}".format(src.size()))
-
+        if self.input_bn is not None:
+            x_enc = x_enc.transpose(1,2)
+            x_enc = self.input_bn(x_enc)
+            x_enc = x_enc.transpose(1,2)
+        if self.input_ln is not None:
+            x_enc = self.input_ln(x_enc)
+        if self.input_do is not None:
+            x_enc = self.input_do(x_enc)
+            
+        x_enc = self.encoder_input_layer(x_enc) # src shape: [batch_size, src length, dim_val] regardless of number of input features
+        
         # Pass through the positional encoding layer
-        src = self.positional_encoding_layer(src) # src shape: [batch_size, src length, dim_val] regardless of number of input features
-        #print("From model.forward(): Size of src after pos_enc layer: {}".format(src.size()))
+        x_enc = self.positional_encoding_layer(x_enc) # x_enc shape: [batch_size, x_enc length, dim_val] regardless of number of input features
+        #print("From model.forward(): Size of x_enc after pos_enc layer: {}".format(x_enc.size()))
 
         # Pass through all the stacked encoder layers in the encoder
         # Masking is only needed in the encoder if input sequences are padded
         # which they are not in this time series use case, because all my
         # input sequences are naturally of the same length. 
         # (https://github.com/huggingface/transformers/issues/4083)
-        src = self.encoder( # src shape: [batch_size, enc_seq_len, dim_val]
-            src=src
-            )
-        #print("From model.forward(): Size of src after encoder: {}".format(src.size()))
+        x_enc = self.encoder(x_enc)
+        #print("From model.forward(): Size of x after encoder: {}".format(x.size()))
 
         # Pass decoder input through decoder input layer
-        decoder_output = self.decoder_input_layer(tgt) # src shape: [target sequence length, batch_size, dim_val] regardless of number of input features
+        decoder_output = self.decoder_input_layer(x_dec) # x shape: [target sequence length, batch_size, dim_val] regardless of number of input features
         #print("From model.forward(): Size of decoder_output after linear decoder layer: {}".format(decoder_output.size()))
 
-        #if src_mask is not None:
-            #print("From model.forward(): Size of src_mask: {}".format(src_mask.size()))
-        #if tgt_mask is not None:
-            #print("From model.forward(): Size of tgt_mask: {}".format(tgt_mask.size()))
+        #if x_mask is not None:
+            #print("From model.forward(): Size of x_mask: {}".format(x_mask.size()))
+        #if x_dec_mask is not None:
+            #print("From model.forward(): Size of x_dec_mask: {}".format(x_dec_mask.size()))
 
         # Pass throguh decoder - output shape: [batch_size, target seq len, dim_val]
         decoder_output = self.decoder(
-            tgt=decoder_output,
-            memory=src,
-            tgt_mask=tgt_mask,
-            memory_mask=src_mask
+            x_dec=decoder_output,
+            memory=x_enc,
+            x_dec_mask=None,
+            memory_mask=None
             )
 
         #print("From model.forward(): decoder_output shape after decoder: {}".format(decoder_output.shape))
 
         # Pass through linear mapping
-        decoder_output = self.linear_mapping(decoder_output) # shape [batch_size, target seq len]
-        #print("From model.forward(): decoder_output size after linear_mapping = {}".format(decoder_output.size()))
-
+        decoder_output = self.linear_mapping(decoder_output)
+        
         return decoder_output
 
 

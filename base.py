@@ -56,6 +56,7 @@ class TFConfig:
     num_heads: int
     dim_feedforward: int
     dropout: float = 0.2
+    norm_type: str = 'batch'
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
 
