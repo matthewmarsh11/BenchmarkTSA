@@ -19,6 +19,8 @@ from models import *
 from Bioprocess_Sim import *
 from CSTR_Sim import *
 np.random.seed(42)
+torch.manual_seed(42)
+
 from fvcore.nn import FlopCountAnalysis
 
 # Turn on Latex for last bit because it takes fucking ages
@@ -422,7 +424,6 @@ class ModelTrainer:
 
     def train(self, train_loader: DataLoader, test_loader: DataLoader, val_loader: DataLoader,
             criterion: nn.Module) -> Dict[str, List[float]]:
-        
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
         early_stopping = EarlyStopping(self.config)
@@ -993,6 +994,15 @@ class ModelOptimisation:
                 'output_dim': self.y_train.shape[2],
                 'horizon': self.train_config.horizon
             }
+        elif issubclass(self.model_class, BaseEncoderDecoder):
+            model_kwargs = {
+            'encoder_config': self.model_config,
+            'decoder_config': self.model_config,
+            'input_dim': self.X_train.shape[2],
+            'output_dim': self.y_train.shape[2],
+            'horizon': self.train_config.horizon
+            }
+            
         else:
             model_kwargs = {
                 'config': self.model_config,
@@ -1542,7 +1552,7 @@ def main():
         dropout=0.2,
     )
     
-    model = EncoderDecoderTransformer(encoder_config, decoder_config, input_dim=X_train.shape[2], horizon = training_config.horizon,
+    model = EncoderDecoderLSTM(LSTM_Config, LSTM_Config, input_dim=X_train.shape[2], horizon = training_config.horizon,
                             output_dim=y_train.shape[2])
     
     # model = DecoderOnlyTransformer(TF_Config, input_dim=X_train.shape[2], output_dim=y_train.shape[2], horizon = training_config.horizon, quantiles=quantiles)
@@ -1645,7 +1655,7 @@ def main():
     actions = features[:, -int(features.shape[1] - targets.shape[1]):]
     # print(actions.shape)
     # visualizer.plot_actions(actions, action_names, num_simulations = 10)
-    model_class = LSTM
+    model_class = EncoderDecoderTransformer
     trainer_class = ModelTrainer
     
     CNN_config_bounds = {
@@ -1740,10 +1750,11 @@ def main():
             
             'dropout': (0.1, 0.9),
     }
-        
+    features_path = 'datasets/cstr_sim_features.csv'
+    targets_path = 'datasets/cstr_sim_targets.csv'
     
-    optimizer = ModelOptimisation(model_class, CSTR_sim_config, training_config, LSTM_Config,
-                                  config_bounds=LSTM_ConfigBounds, simulator=CSTRSimulator, converter=CSTRConverter, 
+    optimizer = ModelOptimisation(model_class, training_config, TF_Config, config_bounds=TF_ConfigBounds, 
+                                  features_path = features_path, targets_path= targets_path, converter=CSTRConverter, 
                                   data_processor=DataProcessor, trainer_class=trainer_class, iters = 30, variance=True)
     path = 'best_model.pth'
     best_params, best_loss = optimizer.optimise(path)
