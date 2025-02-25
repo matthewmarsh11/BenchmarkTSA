@@ -426,20 +426,76 @@ class DecoderLSTM(BaseModel):
 
 # Combined Encoder-Decoder Model (Can be used in combination with other models!)
 
-class EncoderDecoder(BaseEncoderDecoder):
-    
-    def __init__(self, encoder_config: LSTMConfig, decoder_config: LSTMConfig, encoder_model: BaseModel, decoder_model: BaseModel):
+class EncoderDecoderLSTM(BaseEncoderDecoder):
+    """Complete Encoder-Decoder LSTM model"""
+    def __init__(self,
+        encoder_config: LSTMConfig,
+        decoder_config: LSTMConfig,
+        input_dim: int,
+        horizon: int,
+        output_dim: int,
+        var: Optional[bool] = None,
+        monte_carlo: Optional[bool] = None,
+        quantiles: Optional[List] = None,
+        ):
+        """
+        Args:
+            encoder_config: Configuration for the encoder
+            decoder_config: Configuration for the decoder
+            input_dim: Number of input variables
+            horizon: Forecast horizon
+            output_dim: Number of output variables
+            var: Whether to output variance for probabilistic forecasting
+            monte_carlo: Whether to use Monte Carlo dropout for uncertainty estimation
+            quantiles: List of quantiles for quantile regression
+        """
         super().__init__(encoder_config, decoder_config)
-        self.encoder_model = encoder_model
-        self.decoder_model = decoder_model
         
+        self.input_dim = input_dim
+        self.horizon = horizon
+        self.output_dim = output_dim
+        self.var = var
+        self.monte_carlo = monte_carlo
+        self.quantiles = quantiles
+        
+        # Create the encoder
+        self.encoder_model = EncoderLSTM(
+            config=encoder_config,
+            input_dim=input_dim,
+            monte_carlo=monte_carlo
+        )
+        
+        # Determine the hidden dimension from encoder output
+        lstm_output_dim = encoder_config.hidden_dim * 2 if encoder_config.bidirectional else encoder_config.hidden_dim
+        
+        # Create the decoder
+        self.decoder_model = DecoderLSTM(
+            config=decoder_config,
+            hidden_dim=lstm_output_dim,
+            output_dim=output_dim,
+            horizon=horizon,
+            quantiles=quantiles,
+            monte_carlo=monte_carlo,
+            var=var
+        )
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        
-        # Encoder forward pass
+        """
+        Args:
+            x: Input tensor, shape [batch_size, seq_len, input_dim]
+        """
+        # Get encoder outputs and hidden state
         encoder_output, encoder_hidden = self.encoder_model(x)
         
-        # Decoder forward pass using encoder's hidden state
-        decoder_output = self.decoder_model(encoder_output, encoder_hidden)
+        # For LSTM models, we'll use the last hidden state as the decoder input
+        # Create a target sequence using the encoder output for the last time step
+        decoder_input = encoder_output[:, -1:, :].repeat(1, self.horizon, 1)
+        
+        # Pass encoder hidden state and decoder input to decoder
+        decoder_output = self.decoder_model(
+            decoder_input=decoder_input,
+            encoder_hidden=encoder_hidden
+        )
         
         return decoder_output
         
@@ -812,6 +868,7 @@ class DecoderOnlyTransformer(BaseModel):
                  horizon: int, quantiles: Optional[List[float]] = None, 
                  monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
         super().__init__(config)
+        
         self.config = config
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -1207,5 +1264,5 @@ class EncoderDecoderTransformer(BaseEncoderDecoder):
 # Graph Neural Networks (GNNs)
 
 class ST_GCN(BaseModel):
-    """Spatial-Temporal Graph Convolutional Network"""
+    """Spatio-Temporal Graph Convolutional Network"""
     
