@@ -422,6 +422,7 @@ class ModelTrainer:
 
     def train(self, train_loader: DataLoader, test_loader: DataLoader, val_loader: DataLoader,
             criterion: nn.Module) -> Dict[str, List[float]]:
+        
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate, weight_decay = self.config.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.config.factor, patience=self.config.patience, verbose=True)
         early_stopping = EarlyStopping(self.config)
@@ -1424,7 +1425,7 @@ class ConformalQuantile:
 
 def main():
     # Configurations
-    CSTR_sim_config = SimulationConfig(n_simulations=100, T=101, tsim=500, noise_percentage=0.01)
+    CSTR_sim_config = SimulationConfig(n_simulations=10, T=101, tsim=500, noise_percentage=0.01)
     Biop_sim_config = SimulationConfig(n_simulations=10, T=20, tsim=240)
     
     
@@ -1541,8 +1542,10 @@ def main():
         dropout=0.2,
     )
     
-    model = EcDcTransformer(encoder_config, decoder_config, input_dim=X_train.shape[2], horizon = training_config.horizon,
+    model = EncoderDecoderTransformer(encoder_config, decoder_config, input_dim=X_train.shape[2], horizon = training_config.horizon,
                             output_dim=y_train.shape[2])
+    
+    # model = DecoderOnlyTransformer(TF_Config, input_dim=X_train.shape[2], output_dim=y_train.shape[2], horizon = training_config.horizon, quantiles=quantiles)
     
     # y_train of shape (time_steps, horizon, features)
     # model = LSTM(
@@ -1609,7 +1612,7 @@ def main():
     # var = vars.detach().numpy()
     # var = data_processor.reconstruct_sequence(var, True)
     means = data_processor.target_scaler.inverse_transform(means)
-    # rescaled_pred = data_processor.rescale_predictions(mean, var)
+    # rescaled_pred = data_processor.rescale_predictions(means, var)
     # means = rescaled_pred[0]
     # variances = rescaled_pred[1]
     

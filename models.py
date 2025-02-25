@@ -725,7 +725,7 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:x.size(0)]
 
 # Encoder Only Model
-class TransformerEncoder(BaseModel):
+class EncoderOnlyTransformer(BaseModel):
     def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int,
                  horizon: int, quantiles: Optional[List[float]] = None, 
                  monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
@@ -807,10 +807,305 @@ class TransformerEncoder(BaseModel):
         
         return output.view(-1, self.horizon, self.output_dim)
 
+class DecoderOnlyTransformer(BaseModel):
+    def __init__(self, config: TrainingConfig, input_dim: int, output_dim: int,
+                 horizon: int, quantiles: Optional[List[float]] = None, 
+                 monte_carlo: Optional[bool] = False, var: Optional[bool] = False):
+        super().__init__(config)
+        self.config = config
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.horizon = horizon
+        
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
+        
+        if self.quantiles is not None:
+            self.output_dim = output_dim * len(quantiles)
+        
+        # Input projection layer
+        self.input_projection = nn.Linear(self.input_dim, self.config.d_model)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(self.config.d_model)
+        
+        # Transformer decoder layers
+        decoder_layers = nn.TransformerDecoderLayer(
+            d_model=self.config.d_model,
+            nhead=self.config.num_heads,
+            dim_feedforward=self.config.dim_feedforward,
+            dropout=self.config.dropout,
+            batch_first=True
+        )
+        
+        # Transformer decoder (using self-attention only)
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layers, 
+            num_layers=self.config.num_layers
+        )
+        
+        # Output layers for forecasting
+        self.output_layer = nn.Sequential(
+            nn.Linear(self.config.d_model, self.config.dim_feedforward),
+            nn.ReLU(),
+            nn.Dropout(self.config.dropout),
+            nn.Linear(self.config.dim_feedforward, self.output_dim)
+        )
+        
+        if self.var:
+            self.fc_logvar = nn.Sequential(
+                nn.Linear(self.config.d_model, self.config.dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(self.config.dim_feedforward, self.output_dim)
+            )
+
+    def _generate_square_subsequent_mask(self, sz):
+        """Generate a square mask for the sequence. The masked positions are filled with float('-inf').
+        Unmasked positions are filled with float(0.0).
+        """
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+    
+    def forward(self, x, target_seq=None):
+        batch_size = x.size(0)
+        seq_len = x.size(1)
+        
+        # Project input to d_model dimensions
+        x = self.input_projection(x)
+        
+        # Add positional encoding
+        x = self.pos_encoder(x)
+        
+        # Generate causal mask for self-attention
+        # This ensures the model only looks at previous positions
+        mask = self._generate_square_subsequent_mask(seq_len).to(x.device)
+        
+        # If we're in inference mode and target_seq is provided
+        if target_seq is not None:
+            # Prepare autoregressive generation
+            # Concatenate the input and target sequences
+            target_seq = self.input_projection(target_seq)
+            target_seq = self.pos_encoder(target_seq)
+            
+            combined_seq = torch.cat([x, target_seq], dim=1)
+            # Update mask to account for the combined sequence length
+            mask = self._generate_square_subsequent_mask(combined_seq.size(1)).to(x.device)
+            
+            # Apply transformer decoder
+            # In decoder-only mode, we pass the same tensor as both tgt and memory
+            decoder_output = self.transformer_decoder(
+                tgt=combined_seq,
+                memory=combined_seq,  # Same as target in decoder-only architecture
+                tgt_mask=mask
+            )
+            
+            # Extract just the forecast part of the output
+            decoder_output = decoder_output[:, -self.horizon:, :]
+        else:
+            # Apply transformer decoder with self-attention only
+            # In decoder-only mode, we pass the same tensor as both tgt and memory
+            decoder_output = self.transformer_decoder(
+                tgt=x,
+                memory=x,  # Same as target in decoder-only architecture
+                tgt_mask=mask
+            )
+            
+            # Take the last 'horizon' elements for prediction
+            decoder_output = decoder_output[:, -self.horizon:, :]
+        
+        # Create outputs for each timestep in the horizon
+        forecasts = []
+        variances = [] if self.var else None
+        
+        for i in range(self.horizon):
+            # Apply output layer to each position
+            step_output = self.output_layer(decoder_output[:, i])
+            forecasts.append(step_output)
+            
+            # If variance is needed, compute it for each step
+            if self.var:
+                step_var = torch.exp(self.fc_logvar(decoder_output[:, i]))
+                variances.append(step_var)
+        
+        # Stack outputs along a new dimension to get [batch, horizon, features]
+        forecasts = torch.stack(forecasts, dim=1)
+        
+        if self.var:
+            variances = torch.stack(variances, dim=1)
+            return forecasts, variances
+        
+        if self.monte_carlo: # Dropout from the output
+        # Pass the output 
+            x = nn.Dropout(p=self.config.dropout)(x)
+            out = self.fc(x)
+            # shape of out is [batch_size, output_dim], reshape to [batch, horizon, features]
+            return out.view(-1, self.horizon, self.output_dim)
+        
+        if self.quantiles is not None:
+            # Reshape for quantile outputs
+            return forecasts.view(batch_size, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        return forecasts
+
+
 # Encoder and Decoder Transformers
 
-class EcDcTransformer(BaseEncoderDecoder):
-    """Encoder-Decoder Transformer model"""
+class EncoderTransformer(BaseModel):
+    """Transformer Encoder model"""
+    def __init__(self, config: TFConfig, input_dim: int,
+                 monte_carlo: Optional[bool] = False):
+        super().__init__(config)
+        
+        self.input_dim = input_dim
+        self.monte_carlo = monte_carlo
+        
+        # Input normalization and dropout
+        self.input_bn = nn.BatchNorm1d(input_dim) if getattr(self.config.norm_type, 'batch', False) else None
+        self.input_ln = nn.LayerNorm(input_dim) if getattr(self.config.norm_type, 'layer', False) else None
+        self.input_do = nn.Dropout(p=self.config.dropout) if monte_carlo else None
+        
+        # Normalization for the encoder
+        self.ec_norm = nn.BatchNorm1d(self.config.d_model) if getattr(self.config.norm_type, 'batch', False) else nn.LayerNorm(self.config.d_model) if getattr(self.config.norm_type, 'layer', False) else None
+        
+        # Input embedding layer
+        self.encoder_input_layer = nn.Linear(
+            in_features=input_dim, 
+            out_features=self.config.d_model 
+        )
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(self.config.d_model)
+        
+        # Transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.config.d_model, 
+            nhead=self.config.num_heads,
+            dim_feedforward=self.config.dim_feedforward,
+            dropout=self.config.dropout,
+            batch_first=True
+        )
+        
+        # Stack encoder layers
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=self.config.num_layers, 
+            norm=self.ec_norm
+        )
+    
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        # Apply normalization and dropout to input if specified
+        if self.input_bn is not None:
+            x = x.transpose(1, 2)
+            x = self.input_bn(x)
+            x = x.transpose(1, 2)
+        if self.input_ln is not None:
+            x = self.input_ln(x)
+        if self.input_do is not None:
+            x = self.input_do(x)
+        
+        # Input embedding
+        x = self.encoder_input_layer(x)
+        
+        # Apply positional encoding
+        x = self.pos_encoder(x)
+        
+        # Pass through encoder
+        encoder_output = self.encoder(x, src_key_padding_mask=mask)
+        
+        return encoder_output
+    
+class DecoderTransformer(BaseModel):
+    """Transformer Decoder model"""
+    def __init__(self, config: TFConfig, hidden_dim: int, output_dim: int, horizon: int,
+                 quantiles: Optional[List[float]] = None,
+                 monte_carlo: Optional[bool] = False, 
+                 var: Optional[bool] = False):
+        super().__init__(config)
+        
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.horizon = horizon
+        self.quantiles = quantiles
+        self.monte_carlo = monte_carlo
+        self.var = var
+        
+        # Adjust output dimension for quantile regression if specified
+        if self.quantiles:
+            self.output_dim = self.output_dim * len(self.quantiles)
+        
+        # Normalization for the decoder
+        self.dec_norm = nn.BatchNorm1d(self.config.d_model) if getattr(self.config.norm_type, 'batch', False) else nn.LayerNorm(self.config.d_model) if getattr(self.config.norm_type, 'layer', False) else None
+        
+        # Input layer for decoder
+        self.decoder_input_layer = nn.Linear(
+            in_features=hidden_dim,
+            out_features=self.config.d_model
+        )
+        
+        # Output mapping layer
+        self.linear_mapping = nn.Linear(
+            in_features=self.config.d_model, 
+            out_features=self.output_dim
+        )
+        
+        # Variance layer for probabilistic forecasting
+        if self.var:
+            self.var_mapping = nn.Linear(
+                in_features=self.config.d_model,
+                out_features=self.output_dim
+            )
+        
+        # Transformer decoder layers
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.config.d_model,
+            nhead=self.config.num_heads,
+            dim_feedforward=self.config.dim_feedforward,
+            dropout=self.config.dropout,
+            batch_first=True
+        )
+        
+        # Stack decoder layers
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=self.config.num_layers, 
+            norm=self.dec_norm
+        )
+    
+    def forward(self, tgt: torch.Tensor, memory: torch.Tensor, 
+                tgt_mask: torch.Tensor = None, memory_mask: torch.Tensor = None) -> torch.Tensor:
+        # Process the decoder input sequence
+        decoder_input = self.decoder_input_layer(tgt)
+        
+        # Pass through transformer decoder
+        decoder_output = self.decoder(
+            decoder_input,
+            memory=memory,
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask
+        )
+        
+        # Handle variance for probabilistic forecasting
+        if self.var:
+            out = self.linear_mapping(decoder_output)
+            var = torch.exp(self.var_mapping(decoder_output))
+            return out, var
+        
+        # Handle quantile regression
+        if self.quantiles is not None:
+            out = self.linear_mapping(decoder_output)
+            batch_size = out.size(0)
+            return out.view(batch_size, self.horizon, self.output_dim // len(self.quantiles), len(self.quantiles))
+        
+        # Standard output
+        out = self.linear_mapping(decoder_output)
+        batch_size = out.size(0)
+        return out.view(batch_size, self.horizon, -1)
+    
+class EncoderDecoderTransformer(BaseEncoderDecoder):
+    """Complete Encoder-Decoder Transformer model"""
     def __init__(self,
         encoder_config: TFConfig,
         decoder_config: TFConfig,
@@ -820,32 +1115,20 @@ class EcDcTransformer(BaseEncoderDecoder):
         var: Optional[bool] = None,
         monte_carlo: Optional[bool] = None,
         quantiles: Optional[List] = None,
-        ): 
-
+        ):
         """
         Args:
-            input_size: int, number of input variables. 1 if univariate.
-            dec_seq_len: int, the length of the input sequence fed to the decoder
-            dim_val: int, aka d_model. All sub-layers in the model produce 
-                     outputs of dimension dim_val
-            n_encoder_layers: int, number of stacked encoder layers in the encoder
-            n_decoder_layers: int, number of stacked encoder layers in the decoder
-            n_heads: int, the number of attention heads (aka parallel attention layers)
-            dropout_encoder: float, the dropout rate of the encoder
-            dropout_decoder: float, the dropout rate of the decoder
-            dropout_pos_enc: float, the dropout rate of the positional encoder
-            dim_feedforward_encoder: int, number of neurons in the linear layer 
-                                     of the encoder
-            dim_feedforward_decoder: int, number of neurons in the linear layer 
-                                     of the decoder
-            num_predicted_features: int, the number of features you want to predict.
-                                    Most of the time, this will be 1 because we're
-                                    only forecasting FCR-N prices in DK2, but in
-                                    we wanted to also predict FCR-D with the same
-                                    model, num_predicted_features should be 2.
+            encoder_config: Configuration for the encoder
+            decoder_config: Configuration for the decoder
+            input_dim: Number of input variables
+            horizon: Forecast horizon
+            output_dim: Number of output variables
+            var: Whether to output variance for probabilistic forecasting
+            monte_carlo: Whether to use Monte Carlo dropout for uncertainty estimation
+            quantiles: List of quantiles for quantile regression
         """
-
-        super().__init__(encoder_config, decoder_config) 
+        super().__init__(encoder_config, decoder_config)
+        
         self.input_dim = input_dim
         self.horizon = horizon
         self.output_dim = output_dim
@@ -853,145 +1136,73 @@ class EcDcTransformer(BaseEncoderDecoder):
         self.monte_carlo = monte_carlo
         self.quantiles = quantiles
         
+        # Adjust output dimension for quantile regression if specified
         if self.quantiles:
             self.output_dim = self.output_dim * len(self.quantiles)
-            
-        self.input_bn = nn.BatchNorm1d(self.input_dim) if getattr(self.encoder_config.norm_type, 'batch', False) else None
-        self.input_ln = nn.LayerNorm(self.input_dim) if getattr(self.encoder_config.norm_type, 'layer', False) else None
-        self.input_do = nn.Dropout(p = self.encoder_config.dropout) if self.monte_carlo else None
         
-        self.ec_norm = nn.BatchNorm1d(self.encoder_config.d_model) if getattr(self.encoder_config.norm_type, 'batch', False) else nn.LayerNorm(self.encoder_config.d_model) if getattr(self.encoder_config.norm_type, 'layer', False) else None
-        self.dec_norm = nn.BatchNorm1d(self.decoder_config.d_model) if getattr(self.decoder_config.norm_type, 'batch', False) else nn.LayerNorm(self.decoder_config.d_model) if getattr(self.decoder_config.norm_type, 'layer', False) else None
-
-        # Creating the three linear layers needed for the model
-        self.encoder_input_layer = nn.Linear(
-            in_features=input_dim, 
-            out_features=self.encoder_config.d_model 
-            )
-
-        self.decoder_input_layer = nn.Linear(
-            in_features=self.encoder_config.d_model,
-            out_features=self.decoder_config.d_model,
-            )  
+        # Create the encoder
+        self.encoder_model = EncoderTransformer(
+            config=encoder_config,
+            input_dim=input_dim,
+            monte_carlo=monte_carlo
+        )
         
-        self.linear_mapping = nn.Linear(
-            in_features=self.decoder_config.d_model, 
-            out_features=self.output_dim
-            )
-
-        # Create positional encoder
-        self.pos_encoder = PositionalEncoding(self.encoder_config.d_model)
-
-        # The encoder layer used in the paper is identical to the one used by
-        # Vaswani et al (2017) on which the PyTorch module is based.
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.encoder_config.d_model, 
-            nhead=self.encoder_config.num_heads,
-            dim_feedforward=self.encoder_config.dim_feedforward,
-            dropout=self.encoder_config.dropout,
-            batch_first=True
-            )
-
-        # Stack the encoder layers in nn.TransformerDecoder
-        # It seems the option of passing a normalization instance is redundant
-        # in my case, because nn.TransformerEncoderLayer per default normalizes
-        # after each sub-layer
-        # (https://github.com/pytorch/pytorch/issues/24930).
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer,
-            num_layers=self.encoder_config.num_layers, 
-            norm=self.ec_norm
-            )
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=self.decoder_config.d_model,
-            nhead=self.decoder_config.num_heads,
-            dim_feedforward=self.decoder_config.dim_feedforward,
-            dropout=self.decoder_config.dropout,
-            
-            )
-
-        # Stack the decoder layers in nn.TransformerDecoder
-        # It seems the option of passing a normalization instance is redundant
-        # in my case, because nn.TransformerDecoderLayer per default normalizes
-        # after each sub-layer
-        # (https://github.com/pytorch/pytorch/issues/24930).
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer=decoder_layer,
-            num_layers=self.decoder_config.num_layers, 
-            norm=self.dec_norm
-            )
-
-    def forward(self, x_enc: torch.Tensor, x_dec: torch.Tensor, x_mask: torch.Tensor=None, 
-                tgt_mask: torch.Tensor=None) -> torch.Tensor:
+        # Create the decoder
+        self.decoder_model = DecoderTransformer(
+            config=decoder_config,
+            hidden_dim=encoder_config.d_model,
+            output_dim=output_dim,
+            horizon=horizon,
+            quantiles=quantiles,
+            monte_carlo=monte_carlo,
+            var=var
+        )
+    
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None, tgt_mask: torch.Tensor = None) -> torch.Tensor:
         """
-        Returns a tensor of shape:
-        [target_sequence_length, batch_size, num_predicted_features]
-        
         Args:
-            src: the encoder's output sequence. Shape: (S,E) for unbatched input, 
-                 (S, N, E) if batch_first=False or (N, S, E) if 
-                 batch_first=True, where S is the source sequence length, 
-                 N is the batch size, and E is the number of features (1 if univariate)
-            tgt: the sequence to the decoder. Shape: (T,E) for unbatched input, 
-                 (T, N, E)(T,N,E) if batch_first=False or (N, T, E) if 
-                 batch_first=True, where T is the target sequence length, 
-                 N is the batch size, and E is the number of features (1 if univariate)
-            src_mask: the mask for the src sequence to prevent the model from 
-                      using data points from the target sequence
-            tgt_mask: the mask for the tgt sequence to prevent the model from
-                      using data points from the target sequence
+            x: Input tensor, shape [batch_size, seq_len, input_dim]
+            x_mask: Mask for the encoder inputs
+            tgt_mask: Mask for the decoder inputs
         """
-
-        #print("From model.forward(): Size of src as given to forward(): {}".format(src.size()))
-        #print("From model.forward(): tgt size = {}".format(tgt.size()))
-        if self.input_bn is not None:
-            x_enc = x_enc.transpose(1,2)
-            x_enc = self.input_bn(x_enc)
-            x_enc = x_enc.transpose(1,2)
-        if self.input_ln is not None:
-            x_enc = self.input_ln(x_enc)
-        if self.input_do is not None:
-            x_enc = self.input_do(x_enc)
-            
-        x_enc = self.encoder_input_layer(x_enc) # src shape: [batch_size, src length, dim_val] regardless of number of input features
+        # Get encoder outputs
+        encoder_output = self.encoder_model(x, mask=x_mask)
         
-        # Pass through the positional encoding layer
-        x_enc = self.positional_encoding_layer(x_enc) # x_enc shape: [batch_size, x_enc length, dim_val] regardless of number of input features
-        #print("From model.forward(): Size of x_enc after pos_enc layer: {}".format(x_enc.size()))
-
-        # Pass through all the stacked encoder layers in the encoder
-        # Masking is only needed in the encoder if input sequences are padded
-        # which they are not in this time series use case, because all my
-        # input sequences are naturally of the same length. 
-        # (https://github.com/huggingface/transformers/issues/4083)
-        x_enc = self.encoder(x_enc)
-        #print("From model.forward(): Size of x after encoder: {}".format(x.size()))
-
-        # Pass decoder input through decoder input layer
-        decoder_output = self.decoder_input_layer(x_dec) # x shape: [target sequence length, batch_size, dim_val] regardless of number of input features
-        #print("From model.forward(): Size of decoder_output after linear decoder layer: {}".format(decoder_output.size()))
-
-        #if x_mask is not None:
-            #print("From model.forward(): Size of x_mask: {}".format(x_mask.size()))
-        #if x_dec_mask is not None:
-            #print("From model.forward(): Size of x_dec_mask: {}".format(x_dec_mask.size()))
-
-        # Pass throguh decoder - output shape: [batch_size, target seq len, dim_val]
-        decoder_output = self.decoder(
-            x_dec=decoder_output,
-            memory=x_enc,
-            x_dec_mask=None,
+        # For transformer models, we need to initialize a decoder input sequence
+        # We'll use the last time step of the encoder output to initialize
+        batch_size = x.size(0)
+        
+        # Create a target sequence of the appropriate length (horizon)
+        # Initially, we'll use the last time step of encoder output repeated horizon times
+        decoder_input = encoder_output[:, -1:, :].repeat(1, self.horizon, 1)
+        
+        # Use a causal mask for autoregressive generation if tgt_mask is not provided
+        if tgt_mask is None:
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+                self.horizon).to(x.device)
+        
+        # Pass encoder outputs and decoder input to decoder
+        decoder_output = self.decoder_model(
+            tgt=decoder_input,
+            memory=encoder_output,
+            tgt_mask=tgt_mask,
             memory_mask=None
-            )
-
-        #print("From model.forward(): decoder_output shape after decoder: {}".format(decoder_output.shape))
-
-        # Pass through linear mapping
-        decoder_output = self.linear_mapping(decoder_output)
+        )
         
-        return decoder_output
-
+        # Reshape output to [batch_size, horizon, output_dim]
+        if self.monte_carlo: # Dropout from the output
+        # Pass the output 
+            x = nn.Dropout(p=self.config.dropout)(decoder_output)
+            decoder_output = self.fc(x)
+            
+        if self.var:
+            out, var = decoder_output
+            return out.view(batch_size, self.horizon, -1), var.view(batch_size, self.horizon, -1)
+        elif self.quantiles:
+            return decoder_output.view(batch_size, self.horizon, -1, len(self.quantiles))
+        else:
+            return decoder_output.view(batch_size, self.horizon, -1)
+        
 
 # Graph Neural Networks (GNNs)
 
