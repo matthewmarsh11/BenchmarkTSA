@@ -18,7 +18,6 @@ torch.manual_seed(42)
 
 features_path = 'datasets/cstr_sim_features.csv'
 targets_path = 'datasets/cstr_sim_targets.csv'
-
 noiseless = pd.read_csv('datasets/cstr_noiseless_results.csv')
 features = pd.read_csv(features_path)
 targets = pd.read_csv(targets_path)
@@ -127,15 +126,18 @@ MLR_bounds = {
 
 model_dict = {
     LSTM : (LSTM_Config, {**training_bounds, **LSTM_bounds}),
+    EncoderDecoderLSTM: (LSTM_Config, {**training_bounds, **LSTM_bounds}),
     CNN: (CNN_Config, {**training_bounds, **CNN_bounds}),
-    TransformerEncoder: (TF_Config, {**training_bounds, **TF_bounds}),
+    EncoderOnlyTransformer: (TF_Config, {**training_bounds, **TF_bounds}),
+    DecoderOnlyTransformer: (TF_Config, {**training_bounds, **TF_bounds}),
+    EncoderDecoderTransformer: (TF_Config, {**training_bounds, **TF_bounds}),
     MLP: (MLP_Config, {**training_bounds, **MLP_bounds}),
     MLR: (MLR_Config, {**training_bounds, **MLR_bounds})
 }
 
 # Iterate through each defined model to optimise
 
-model = CNN
+model = EncoderDecoderLSTM
 model_config = model_dict[model][0]
 bounds = model_dict[model][1]
 
@@ -153,7 +155,7 @@ optimiser = ModelOptimisation(
     converter = CSTRConverter,
     data_processor = DataProcessor,
     trainer_class = ModelTrainer,
-    iters = 10,
+    iters = 200,
     quantiles = None, # Define how to quantify uncertainty
     monte_carlo = None,
     variance = True,
