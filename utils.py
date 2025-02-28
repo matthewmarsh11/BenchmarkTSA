@@ -152,7 +152,7 @@ class BioprocessConverter(SimulationConverter):
         
 
         return features, targets
-
+    
 class ScalingResult(NamedTuple):
     """Container for scaled mean and variance results"""
     mean: np.ndarray
@@ -1491,10 +1491,12 @@ def main():
     # simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
     simulation_results, noiseless_sim = simulator.run_multiple_simulations()
+    battery_data = pd.read_csv('datasets/battery/B05_discharge_soh.csv')
     converter = CSTRConverter()
+    converter = BatteryConverter()
     # converter = BioprocessConverter()
-    features, targets = converter.convert(simulation_results)
-    noiseless_results, _ = converter.convert(noiseless_sim)
+    features, targets = converter.convert(battery_data)
+    # noiseless_results, _ = converter.convert(noiseless_sim)
     
     data_processor = DataProcessor(training_config, features, targets)
     # Prepare data
