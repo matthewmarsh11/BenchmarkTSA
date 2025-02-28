@@ -525,7 +525,7 @@ class Visualizer:
     """Handles visualization of results."""
     @staticmethod
     def plot_preds(preds: Union[np.ndarray, Dict[float, np.ndarray]],    
-                         noisy_data, noiseless_data: np.ndarray, sequence_length: int,
+                         noisy_data, noiseless_data: Union[np.ndarray, None], sequence_length: int,
                          time_horizon: int, feature_names: list, num_simulations: int, 
                          train_test_split: float, test_val_split: float,
                          vars: Optional[np.ndarray] = None):
@@ -569,7 +569,8 @@ class Visualizer:
                     preds[tv_idx:, i], label=f'{sim} Val Predictions', color='cyan', alpha=0.7)
             
             plt.plot(noisy_data[:, i], label=f'{sim} Noisy Simulation', color='green', alpha=0.7)
-            plt.plot(noiseless_data[:, i], label=f'{sim} Noiseless Data', color='black', linestyle = 'dashed', alpha=0.7)
+            if noiseless_data is not None:
+                plt.plot(noiseless_data[:, i], label=f'{sim} Noiseless Data', color='black', linestyle = 'dashed', alpha=0.7)
             
             plt.title(f'{sim} Predictions')
             plt.xlabel('Time Step')
@@ -1454,7 +1455,7 @@ def main():
     )
     LSTM_Config = LSTMConfig(
         hidden_dim = 64,
-        num_layers=8,
+        num_layers=4,
         dropout = 0.2,
         bidirectional=False,
         norm_type = None,
@@ -1490,13 +1491,13 @@ def main():
     simulator = CSTRSimulator(CSTR_sim_config)
     # simulator = BioProcessSimulator(Biop_sim_config)
     # Get data
-    simulation_results, noiseless_sim = simulator.run_multiple_simulations()
-    battery_data = pd.read_csv('datasets/battery/B05_discharge_soh.csv')
+    # simulation_results, noiseless_sim = simulator.run_multiple_simulations()
     converter = CSTRConverter()
-    converter = BatteryConverter()
     # converter = BioprocessConverter()
-    features, targets = converter.convert(battery_data)
+    # features, targets = converter.convert(simulation_results)
     # noiseless_results, _ = converter.convert(noiseless_sim)
+    features = pd.read_csv('datasets/battery_clean/features_A.csv')
+    targets = pd.read_csv('datasets/battery_clean/targets_A.csv')
     
     data_processor = DataProcessor(training_config, features, targets)
     # Prepare data
@@ -1554,19 +1555,19 @@ def main():
         dropout=0.2,
     )
     
-    model = EncoderDecoderLSTM(LSTM_Config, LSTM_Config, input_dim=X_train.shape[2], horizon = training_config.horizon,
-                            output_dim=y_train.shape[2])
+    # model = EncoderDecoderLSTM(LSTM_Config, LSTM_Config, input_dim=X_train.shape[2], horizon = training_config.horizon,
+    #                         output_dim=y_train.shape[2])
     
     # model = DecoderOnlyTransformer(TF_Config, input_dim=X_train.shape[2], output_dim=y_train.shape[2], horizon = training_config.horizon, quantiles=quantiles)
     
     # y_train of shape (time_steps, horizon, features)
-    # model = LSTM(
-    #     config=LSTM_Config,
-    #     input_dim=X_train.shape[2],
-    #     output_dim=y_train.shape[2],
-    #     horizon = training_config.horizon,
-    #     var = True,
-    # )
+    model = LSTM(
+        config=LSTM_Config,
+        input_dim=X_train.shape[2],
+        output_dim=y_train.shape[2],
+        horizon = training_config.horizon,
+        var = True,
+    )
     
     # print('X_train shape:', X_train.shape[2])
     # print('outptu_dim:', y_train.shape[1])
@@ -1592,10 +1593,10 @@ def main():
     # )
 
     # Train model
-    criterion = nn.MSELoss()
+    # criterion = nn.MSELoss()
     # criterion = QuantileLoss(quantiles)
     # criterion = EnhancedQuantileLoss(quantiles, smoothness_lambda=0.1)
-    # criterion = nn.GaussianNLLLoss()
+    criterion = nn.GaussianNLLLoss()
     
     trainer = ModelTrainer(model, training_config)
     model, history, avg_loss = trainer.train(train_loader, test_loader, val_loader, criterion)
@@ -1616,17 +1617,17 @@ def main():
     # test_pred = data_processor.quantile_invert(test_pred, quantiles)
     
     with torch.no_grad():
-        preds = model(X)
+        preds, var = model(X)
     # preds = data_processor.quantile_invert(pred, quantiles)
     
     mean = preds.detach().numpy()
     means = data_processor.reconstruct_sequence(mean, False)
-    # var = vars.detach().numpy()
-    # var = data_processor.reconstruct_sequence(var, True)
-    means = data_processor.target_scaler.inverse_transform(means)
-    # rescaled_pred = data_processor.rescale_predictions(means, var)
-    # means = rescaled_pred[0]
-    # variances = rescaled_pred[1]
+    var = vars.detach().numpy()
+    var = data_processor.reconstruct_sequence(var, True)
+    # means = data_processor.target_scaler.inverse_transform(means)
+    rescaled_pred = data_processor.rescale_predictions(means, var)
+    means = rescaled_pred[0]
+    variances = rescaled_pred[1]
     
     # mc_predictor = MC_Prediction(model, num_samples=100)
     # train_pred, train_var = mc_predictor.predict(X_train.to(training_config.device))
@@ -1650,7 +1651,7 @@ def main():
                                 sequence_length,
                                 time_horizon, feature_names,
                                 num_simulations = 10,
-                                train_test_split = 0.6, test_val_split = 0.8)
+                                train_test_split = 0.6, test_val_split = 0.8, vars=variances)
     # visualizer.plot_loss(history)
     # visualizer.plot_loss_loss(history)
     # print(features.shape) # 100, 60 (time steps, features)
