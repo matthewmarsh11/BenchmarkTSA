@@ -4,27 +4,27 @@ from utils import *
 import pandas as pd
 
 # Simulate the CSTR 10 times, with 5000 timesteps over 1000 second period
-CSTR_Config = SimulationConfig(n_simulations=10000,
+CSTR_Config = SimulationConfig(n_simulations=100,
                                 T = 101,
                                 tsim = 500,
                                 noise_percentage=0.01,
                             ) 
 
-BP_Config = SimulationConfig(n_simulations=10000,
+BP_Config = SimulationConfig(n_simulations=10,
                                 T = 20,
                                 tsim = 240,
                                 noise_percentage=0.01,
 )
 
 # simulator = CSTRSimulator(CSTR_Config)
-simulator = CSTRSimulator(BP_Config)
+simulator = CSTRSimulator(CSTR_Config)
 
 simulation_results, noiseless_sim = simulator.run_multiple_simulations()
 
 # Plot the output of the Simulation
 # simulator.plot_results(simulation_results, noiseless_sim)
-converter = BioprocessConverter()
-# converter = CSTRConverter()
+# converter = BioprocessConverter()
+converter = CSTRConverter()
 features, targets = converter.convert(simulation_results)
 noiseless_results, _ = converter.convert(noiseless_sim)
 
@@ -33,9 +33,9 @@ features_df = pd.DataFrame(features)
 targets_df = pd.DataFrame(targets)
 noiseless_results_df = pd.DataFrame(noiseless_results)
 
-features_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/bp_sim_features.csv', index=False)
-targets_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/bp_sim_targets.csv', index=False)
-noiseless_results_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/bp_noiseless_results.csv', index=False)
+features_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/datasets/cstr/small_cstr_features.csv', index=False)
+targets_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/datasets/cstr/small_cstr_targets.csv', index=False)
+noiseless_results_df.to_csv('/Users/MatthewMarsh/Desktop/Academia/Imperial College London/PhD Research/BenchmarkTSA/datasets/cstr/small_cstr_noiseless_results.csv', index=False)
 # # Define a preliminary training configuration for the model
 # # Data processing uses an initial lookback region of 5 timesteps to predict 1 in the future 
 # # with an 80% train test split and a batch size of 4
